@@ -95,6 +95,7 @@ body {
 .title-box,
 .chip,
 .locate-btn,
+.readout,
 .status {
   position: relative;
   border: 1px solid var(--border);
@@ -106,6 +107,7 @@ body {
 .title-box::after,
 .chip::after,
 .locate-btn::after,
+.readout::after,
 .status::after {
   content: "";
   position: absolute;
@@ -158,9 +160,52 @@ body {
   margin-top: 4px;
 }
 
+.top-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
 .chip-row {
   display: flex;
   gap: 10px;
+}
+
+/* ---- located-point forecast readout ---- */
+
+.readout {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 10px 6px;
+  min-width: 96px;
+}
+
+.readout-hidden {
+  display: none;
+}
+
+.readout-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.readout-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.readout-value {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
 }
 
 .chip {

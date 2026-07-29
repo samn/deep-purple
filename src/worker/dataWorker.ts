@@ -4,12 +4,12 @@
  * reprojection index map, and the palette LUTs all live here so the main
  * thread only ever blits finished pixels.
  */
-import { LAYERS, LOAD_PASSES, type LayerConfig } from "../config.ts";
+import { LAYERS, LOAD_PASSES, POINT_VARIABLES, TEMPERATURE_VARIABLE, DEWPOINT_VARIABLE, type LayerConfig } from "../config.ts";
 import { makeLut, makeQuantizer, quantizeField, PRECIP_COLORMAP, SMOKE_COLORMAP, type Quantizer } from "../lib/colormap.ts";
-import { HRRR_GRID } from "../lib/lcc.ts";
+import { HRRR_GRID, makeGridTransform } from "../lib/lcc.ts";
 import { buildIndexMap, paintFrame, type IndexMap } from "../lib/reproject.ts";
-import { loadField, openHrrrDataset, type HrrrDataset } from "../lib/store.ts";
-import type { MainToWorker, PaintRequest, WorkerToMain } from "./protocol.ts";
+import { loadField, openArrays, openHrrrDataset, type HrrrDataset } from "../lib/store.ts";
+import type { MainToWorker, PaintRequest, SampleRequest, WorkerToMain } from "./protocol.ts";
 import { progressiveLeadOrder } from "./schedule.ts";
 
 const COLORMAPS = { precip: PRECIP_COLORMAP, smoke: SMOKE_COLORMAP } as const;
@@ -159,6 +159,64 @@ function handlePaint(req: PaintRequest): void {
   }
 }
 
+const gridTransform = makeGridTransform(HRRR_GRID);
+
+/**
+ * Lazily open the point-readout arrays the first time a sample is requested.
+ * Kept out of the initial store handshake so a store that lacks these
+ * variables (or offline tests without fixtures for them) still loads the map.
+ * Resolves to false if they can't be opened; sampling then no-ops.
+ */
+let pointArraysReady: Promise<boolean> | null = null;
+function ensurePointArrays(ds: HrrrDataset): Promise<boolean> {
+  if (!pointArraysReady) {
+    pointArraysReady = openArrays(
+      ds,
+      POINT_VARIABLES.map((v) => ({ name: v.arrayName, scale: 1 })),
+    )
+      .then(() => true)
+      .catch((e) => {
+        console.warn("point-readout variables unavailable:", e instanceof Error ? e.message : e);
+        return false;
+      });
+  }
+  return pointArraysReady;
+}
+
+/**
+ * Sample temperature + dew point at one grid cell for the requested leads.
+ * Each lead is an independent whole-grid chunk read; failures are per-lead
+ * and non-fatal so the map keeps working.
+ */
+async function handleSample(req: SampleRequest): Promise<void> {
+  if (!dataset) return;
+  const ds = dataset;
+  if (!(await ensurePointArrays(ds))) return;
+
+  const [col, row] = gridTransform.lonLatToGrid(req.lon, req.lat);
+  const ci = Math.min(HRRR_GRID.nx - 1, Math.max(0, Math.round(col)));
+  const ri = Math.min(HRRR_GRID.ny - 1, Math.max(0, Math.round(row)));
+
+  await Promise.all(
+    req.leads.map(async (leadIndex) => {
+      try {
+        const [temp, dew] = await Promise.all([
+          loadField(ds, { name: TEMPERATURE_VARIABLE.arrayName, scale: 1 }, ds.latestInitIndex, leadIndex),
+          loadField(ds, { name: DEWPOINT_VARIABLE.arrayName, scale: 1 }, ds.latestInitIndex, leadIndex),
+        ]);
+        const idx = ri * temp.nx + ci;
+        const temperatureC = temp.values[idx];
+        const dewpointC = dew.values[idx];
+        if (temperatureC === undefined || dewpointC === undefined) return;
+        if (Number.isNaN(temperatureC) || Number.isNaN(dewpointC)) return;
+        post({ type: "sample", requestId: req.requestId, leadIndex, temperatureC, dewpointC });
+      } catch (e) {
+        console.warn(`sample @${leadIndex} failed:`, e instanceof Error ? e.message : e);
+      }
+    }),
+  );
+}
+
 self.onmessage = (ev: MessageEvent<MainToWorker>) => {
   const msg = ev.data;
   const fail = (e: unknown) =>
@@ -170,5 +228,9 @@ self.onmessage = (ev: MessageEvent<MainToWorker>) => {
     handleLoadAll().catch(fail);
   } else if (msg.type === "paint") {
     handlePaint(msg);
+  } else if (msg.type === "sample") {
+    // Sampling failures must never surface as a fatal store error; the map
+    // and animation work fine without the readout.
+    handleSample(msg).catch((e) => console.warn("sample failed:", e));
   }
 };

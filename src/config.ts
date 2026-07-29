@@ -33,6 +33,35 @@ export const SMOKE_LAYER: LayerConfig = {
 
 export const LAYERS: LayerConfig[] = [SMOKE_LAYER, PRECIP_LAYER];
 
+/**
+ * Single-point ("readout") variables sampled at the user's location rather
+ * than rendered as overlays. The store applies a scale_offset codec on read,
+ * so these arrive already in °C — no display scaling needed.
+ */
+export interface PointVariable {
+  id: "temperature" | "dewpoint";
+  label: string;
+  /** Zarr array name. */
+  arrayName: string;
+  units: string;
+}
+
+export const TEMPERATURE_VARIABLE: PointVariable = {
+  id: "temperature",
+  label: "Temp",
+  arrayName: "temperature_2m",
+  units: "°C",
+};
+
+export const DEWPOINT_VARIABLE: PointVariable = {
+  id: "dewpoint",
+  label: "Dew pt",
+  arrayName: "dew_point_temperature_2m",
+  units: "°C",
+};
+
+export const POINT_VARIABLES: PointVariable[] = [TEMPERATURE_VARIABLE, DEWPOINT_VARIABLE];
+
 export const BASEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
 
 /** Number of lead-time frames (0..48 h hourly). */

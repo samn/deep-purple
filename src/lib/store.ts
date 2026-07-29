@@ -114,6 +114,24 @@ export async function openHrrrDataset(
 }
 
 /**
+ * Open additional arrays into an already-open dataset (e.g. point-readout
+ * variables that aren't needed for the initial store handshake). Idempotent:
+ * arrays already present are skipped.
+ */
+export async function openArrays(
+  dataset: HrrrDataset,
+  variables: VariableSpec[],
+): Promise<void> {
+  await Promise.all(
+    variables.map(async (v) => {
+      if (dataset.arrays.has(v.name)) return;
+      const arr = await zarr.open(dataset.store.resolve(`/${v.name}`), { kind: "array" });
+      dataset.arrays.set(v.name, arr);
+    }),
+  );
+}
+
+/**
  * Read one (init, lead) field as Float32Array in north-up row-major order,
  * with display-unit scaling applied.
  */

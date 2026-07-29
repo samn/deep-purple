@@ -46,6 +46,9 @@ export class AppUI {
   private readonly progressBar: HTMLElement;
   private readonly progressWrap: HTMLElement;
   private readonly statusEl: HTMLElement;
+  private readonly readout: HTMLElement;
+  private readonly readoutTemp: HTMLElement;
+  private readonly readoutDew: HTMLElement;
   private readonly chips = new Map<string, HTMLButtonElement>();
   private maxHours = 48;
 
@@ -62,7 +65,8 @@ export class AppUI {
     this.initLabel = el("div", "init-label", titleBox);
     this.initLabel.textContent = "Loading forecast…";
 
-    const chipRow = el("div", "chip-row", top);
+    const topRight = el("div", "top-right", top);
+    const chipRow = el("div", "chip-row", topRight);
     for (const { config, colormap, rangeText } of layers) {
       const chip = el("button", "chip chip-on", chipRow);
       chip.type = "button";
@@ -80,6 +84,18 @@ export class AppUI {
       });
       this.chips.set(config.id, chip);
     }
+
+    // Forecast readout for the located point; hidden until we have a fix and
+    // a value for the current time.
+    this.readout = el("div", "readout readout-hidden", topRight);
+    this.readout.setAttribute("aria-live", "polite");
+    this.readout.setAttribute("aria-label", "Forecast at your location");
+    const tempRow = el("div", "readout-row", this.readout);
+    el("span", "readout-label", tempRow).textContent = "Temp";
+    this.readoutTemp = el("span", "readout-value", tempRow);
+    const dewRow = el("div", "readout-row", this.readout);
+    el("span", "readout-label", dewRow).textContent = "Dew pt";
+    this.readoutDew = el("span", "readout-value", dewRow);
 
     const locate = el("button", "locate-btn", root);
     locate.type = "button";
@@ -155,6 +171,17 @@ export class AppUI {
     }
     this.playBtn.innerHTML = playing ? PAUSE_ICON : PLAY_ICON;
     this.playBtn.setAttribute("aria-label", playing ? "Pause animation" : "Play animation");
+  }
+
+  /** Show the located-point forecast readout, or hide it when null. */
+  setReadout(reading: { temperatureC: number; dewpointC: number } | null): void {
+    if (!reading) {
+      this.readout.classList.add("readout-hidden");
+      return;
+    }
+    this.readoutTemp.textContent = `${Math.round(reading.temperatureC)}°C`;
+    this.readoutDew.textContent = `${Math.round(reading.dewpointC)}°C`;
+    this.readout.classList.remove("readout-hidden");
   }
 
   setProgress(loaded: number, total: number): void {

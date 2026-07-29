@@ -34,7 +34,21 @@ export interface PaintRequest {
   recycle: ArrayBuffer[];
 }
 
-export type MainToWorker = OpenRequest | LoadAllRequest | PaintRequest;
+/**
+ * Sample temperature + dew point at a location for the given lead indices.
+ * Chunks are whole-grid, so there's one chunk fetch per lead regardless of
+ * how few cells we read. `requestId` lets stale responses (after the location
+ * changed) be discarded on the main thread.
+ */
+export interface SampleRequest {
+  type: "sample";
+  requestId: number;
+  lon: number;
+  lat: number;
+  leads: number[];
+}
+
+export type MainToWorker = OpenRequest | LoadAllRequest | PaintRequest | SampleRequest;
 
 export interface OpenedMessage {
   type: "opened";
@@ -87,10 +101,20 @@ export interface FatalErrorMessage {
   message: string;
 }
 
+/** One (init, lead) point sample: temperature + dew point at the location, °C. */
+export interface SampleResultMessage {
+  type: "sample";
+  requestId: number;
+  leadIndex: number;
+  temperatureC: number;
+  dewpointC: number;
+}
+
 export type WorkerToMain =
   | OpenedMessage
   | FrameLoadedMessage
   | PaintedMessage
   | ProgressMessage
   | FrameErrorMessage
+  | SampleResultMessage
   | FatalErrorMessage;

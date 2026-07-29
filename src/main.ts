@@ -5,6 +5,7 @@ import { BASEMAP_STYLE_URL, LAYERS, PRECIP_LAYER, SMOKE_LAYER, STORE_URL } from 
 import { makeLut, PRECIP_COLORMAP, SMOKE_COLORMAP } from "./lib/colormap.ts";
 import { FrameStore } from "./lib/frames.ts";
 import { HRRR_GRID } from "./lib/lcc.ts";
+import { PointSeries } from "./lib/pointSeries.ts";
 import { Timeline } from "./lib/timeline.ts";
 import { GpuForecastLayer, gpuRendererSupported } from "./render/gpuLayer.ts";
 import { ForecastLayer, type OverlayPlacement } from "./render/layer.ts";
@@ -94,6 +95,12 @@ worker.postMessage({
 
 let frameStore: FrameStore | null = null;
 let initTime: Date | null = null;
+let pointSeries: PointSeries | null = null;
+/** Located point being sampled, and a monotonic id so responses from a
+ *  superseded location are ignored. */
+let sampleLoc: { lon: number; lat: number } | null = null;
+let sampleRequestId = 0;
+const sampleInFlight = new Set<number>();
 const forecastLayers = new Map<string, ForecastLayer>();
 // GPU layers exist from startup so frames arriving before the basemap loads
 // are kept; they attach to the map in maybeAddLayers().
@@ -212,8 +219,45 @@ function updateTimeUI(): void {
   ui.setTime(valid, timeline.t, timeline.playing);
 }
 
+/**
+ * Update the top-right temperature/dew-point readout for the current time,
+ * requesting any not-yet-loaded bracketing leads at the located point. No-ops
+ * (and hides the box) until we have both a location and an open store.
+ */
+function refreshReadout(): void {
+  if (!pointSeries || !sampleLoc) {
+    ui.setReadout(null);
+    return;
+  }
+  const [a, b] = pointSeries.bracket(timeline.t);
+  const need = (a === b ? [a] : [a, b]).filter(
+    (li) => !pointSeries!.has(li) && !sampleInFlight.has(li),
+  );
+  if (need.length > 0) {
+    for (const li of need) sampleInFlight.add(li);
+    worker.postMessage({
+      type: "sample",
+      requestId: sampleRequestId,
+      lon: sampleLoc.lon,
+      lat: sampleLoc.lat,
+      leads: need,
+    } satisfies MainToWorker);
+  }
+  ui.setReadout(pointSeries.reading(timeline.t));
+}
+
+/** Point the readout at a new location and start (re)sampling. */
+function setSampleLocation(lon: number, lat: number): void {
+  sampleLoc = { lon, lat };
+  sampleRequestId++;
+  sampleInFlight.clear();
+  pointSeries?.clear();
+  refreshReadout();
+}
+
 timeline.onChange(() => {
   updateTimeUI();
+  refreshReadout();
   renderFrames();
 });
 
@@ -227,6 +271,7 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
         msg.leadHours,
       );
       frameStore.onFrame(renderFrames);
+      pointSeries = new PointSeries(msg.leadHours);
       placement = {
         width: msg.indexWidth,
         height: msg.indexHeight,
@@ -237,6 +282,9 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
       ui.setInit(initTime);
       ui.setStatus("Loading frames…", false);
       updateTimeUI();
+      // A location fix may already have arrived; kick off sampling for it now
+      // that the store (and lead grid) are known.
+      refreshReadout();
       maybeAddLayers();
       worker.postMessage({ type: "loadAll" } satisfies MainToWorker);
       break;
@@ -268,6 +316,14 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
         if (autoplay) timeline.play();
         else updateTimeUI();
       }
+      break;
+    }
+    case "sample": {
+      // Ignore samples for a superseded location.
+      if (msg.requestId !== sampleRequestId || !pointSeries) break;
+      sampleInFlight.delete(msg.leadIndex);
+      pointSeries.set(msg.leadIndex, { temperatureC: msg.temperatureC, dewpointC: msg.dewpointC });
+      ui.setReadout(pointSeries.reading(timeline.t));
       break;
     }
     case "frameError": {
@@ -304,6 +360,7 @@ function requestLocation(fly: boolean): void {
       const { longitude, latitude } = pos.coords;
       if (!inHrrrDomain(longitude, latitude)) return;
       showLocationDot(longitude, latitude);
+      setSampleLocation(longitude, latitude);
       if (fly) {
         map.flyTo({ center: [longitude, latitude], zoom: LOCATED_ZOOM, duration: 1200 });
       } else {
