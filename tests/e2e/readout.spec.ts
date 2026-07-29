@@ -81,24 +81,31 @@ test.describe("forecast readout with a location", () => {
     expect(new Set(positions).size).toBe(1);
   });
 
-  test("centres the labels and values in their columns", async ({ page }) => {
-    const alignment = await page.evaluate(() => {
-      const pick = (sel: string) => getComputedStyle(document.querySelector(sel)!).textAlign;
-      return {
-        label: pick('.readout-metric[data-metric="temp"] .readout-label'),
-        value: pick('.readout-metric[data-metric="temp"] .readout-value'),
-      };
-    });
-    expect(alignment).toEqual({ label: "center", value: "center" });
+  test("centres each label on its value", async ({ page }) => {
+    // Each metric is a column with the label centred directly over the value,
+    // so their horizontal midpoints coincide regardless of label length.
+    const mid = async (sel: string) => {
+      const b = (await page.locator(sel).boundingBox())!;
+      return b.x + b.width / 2;
+    };
+    for (const key of ["temp", "dew"]) {
+      const label = await mid(`.readout-metric[data-metric="${key}"] .readout-label`);
+      const value = await mid(`.readout-metric[data-metric="${key}"] .readout-value`);
+      expect(label).toBeCloseTo(value, 0);
+    }
 
-    // Both metrics are the same shape, so the pairs read as one unit: equal
-    // label columns and equal value boxes.
+    // Both metrics are the same shape, so the pair reads as one unit.
     const width = async (sel: string) => (await page.locator(sel).boundingBox())!.width;
-    expect(await width('.readout-metric[data-metric="temp"] .readout-label')).toBeCloseTo(
-      await width('.readout-metric[data-metric="dew"] .readout-label'),
+    expect(await width('.readout-metric[data-metric="temp"]')).toBeCloseTo(
+      await width('.readout-metric[data-metric="dew"]'),
       1,
     );
     expect(await width(tempValue)).toBeCloseTo(await width(dewValue), 1);
+
+    // The label sits above the value, not beside it.
+    const labelBox = (await page.locator('.readout-metric[data-metric="temp"] .readout-label').boundingBox())!;
+    const valueBox = (await page.locator(tempValue).boundingBox())!;
+    expect(labelBox.y + labelBox.height).toBeLessThanOrEqual(valueBox.y + 1);
   });
 
   test("holds each value's width so digits stay put", async ({ page }) => {

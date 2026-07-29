@@ -343,13 +343,11 @@ body {
 /* ---- located-point forecast readout (in the time row) ---- */
 
 /* Anchored to the row's right edge, so it holds still while the time label to
-   its left changes width ("+9h" -> "+10h" every hour of playback). It may wrap
-   to its own line on very narrow bars; --bar-h keeps the map controls clear
-   when it does. */
+   its left changes width ("+9h" -> "+10h" every hour of playback). */
 .readout {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
+  gap: 16px;
   margin-left: auto;
   /* Never squeezed: it either fits beside the time or wraps as a whole unit,
      rather than being shrunk until its contents overflow. The row's own 12px
@@ -357,33 +355,34 @@ body {
   flex: none;
 }
 
+/* Label stacked over its value, both centred on the same axis: each metric is
+   one tidy column, and the pairs are spaced identically regardless of how long
+   the label happens to be. */
 .readout-metric {
   display: flex;
-  align-items: baseline;
-  gap: 5px;
+  flex-direction: column;
+  align-items: center;
   white-space: nowrap;
 }
 
-/* Both labels share a column so the two metrics form equal-width units. 4.6ch
-   rather than 4ch because the 0.08em letter-spacing makes the longest label
-   ("Temp") wider than four monospace characters; a plain 4ch would leave it
-   sized to content while "Dew" padded out, and the pair would not line up. */
 .readout-label {
-  min-width: 4.6ch;
-  text-align: center;
   font-size: 9px;
   font-weight: 700;
+  line-height: 12px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
+  text-align: center;
   color: var(--muted);
 }
 
-/* Fixed width so the row never reflows as values cross between one, two and
-   three characters ("8°C" -> "31°C" -> "104°F"); centred within that box, which
-   keeps each reading visually tied to its label. */
+/* Fixed width and height so the column never reflows as values cross between
+   one, two and three characters ("8°C" -> "31°C" -> "104°F"), and so the
+   loading placeholder occupies exactly the same box as the text. */
 .readout-value {
-  display: inline-block;
+  box-sizing: border-box;
   min-width: 5ch;
+  height: 18px;
+  line-height: 18px;
   text-align: center;
   font-size: 14px;
   font-weight: 700;
@@ -391,14 +390,15 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Loading: keep the labels and stand a dithered placeholder where each value
-   will land — same 1-bit texture as the panel shadows, same footprint as the
-   text it replaces, so nothing moves when the real numbers arrive. */
+/* Loading: keep the labels and stand a dithered bar where each value will land
+   — same 1-bit texture as the panel shadows. Painted into the content box only,
+   so it reads as a placeholder centred in the value's line rather than filling
+   it, and the box keeps its exact loaded geometry. */
 .readout-loading .readout-value {
-  height: 13px;
-  border-radius: var(--radius-sm);
+  padding: 3px 0;
   background: var(--dither);
   background-size: 4px 4px;
+  background-clip: content-box;
   animation: readout-loading 1.4s ease-in-out infinite;
 }
 
