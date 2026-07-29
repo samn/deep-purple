@@ -351,7 +351,10 @@ body {
   align-items: baseline;
   gap: 10px;
   margin-left: auto;
-  padding-left: 12px;
+  /* Never squeezed: it either fits beside the time or wraps as a whole unit,
+     rather than being shrunk until its contents overflow. The row's own 12px
+     gap provides the separation from the time labels. */
+  flex: none;
 }
 
 .readout-metric {
@@ -361,7 +364,13 @@ body {
   white-space: nowrap;
 }
 
+/* Both labels share a column so the two metrics form equal-width units. 4.6ch
+   rather than 4ch because the 0.08em letter-spacing makes the longest label
+   ("Temp") wider than four monospace characters; a plain 4ch would leave it
+   sized to content while "Dew" padded out, and the pair would not line up. */
 .readout-label {
+  min-width: 4.6ch;
+  text-align: center;
   font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;
@@ -369,13 +378,13 @@ body {
   color: var(--muted);
 }
 
-/* Fixed width, right-aligned: digits stay put as values cross between one, two
-   and three characters ("8°C" -> "31°C" -> "104°F"), so nothing jitters while
-   the timeline runs. Wide enough for a signed three-character reading. */
+/* Fixed width so the row never reflows as values cross between one, two and
+   three characters ("8°C" -> "31°C" -> "104°F"); centred within that box, which
+   keeps each reading visually tied to its label. */
 .readout-value {
   display: inline-block;
   min-width: 5ch;
-  text-align: right;
+  text-align: center;
   font-size: 14px;
   font-weight: 700;
   letter-spacing: -0.02em;

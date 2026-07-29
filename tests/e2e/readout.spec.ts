@@ -81,6 +81,26 @@ test.describe("forecast readout with a location", () => {
     expect(new Set(positions).size).toBe(1);
   });
 
+  test("centres the labels and values in their columns", async ({ page }) => {
+    const alignment = await page.evaluate(() => {
+      const pick = (sel: string) => getComputedStyle(document.querySelector(sel)!).textAlign;
+      return {
+        label: pick('.readout-metric[data-metric="temp"] .readout-label'),
+        value: pick('.readout-metric[data-metric="temp"] .readout-value'),
+      };
+    });
+    expect(alignment).toEqual({ label: "center", value: "center" });
+
+    // Both metrics are the same shape, so the pairs read as one unit: equal
+    // label columns and equal value boxes.
+    const width = async (sel: string) => (await page.locator(sel).boundingBox())!.width;
+    expect(await width('.readout-metric[data-metric="temp"] .readout-label')).toBeCloseTo(
+      await width('.readout-metric[data-metric="dew"] .readout-label'),
+      1,
+    );
+    expect(await width(tempValue)).toBeCloseTo(await width(dewValue), 1);
+  });
+
   test("holds each value's width so digits stay put", async ({ page }) => {
     // Values swing between one and three characters; a fixed box keeps the
     // whole row still rather than reflowing on every hour.
