@@ -34,7 +34,23 @@ export interface PaintRequest {
   recycle: ArrayBuffer[];
 }
 
-export type MainToWorker = OpenRequest | LoadAllRequest | PaintRequest;
+/**
+ * Fetch the whole temperature + dew point series at one grid cell from the
+ * time-optimized store. `initTimeMs` is the run the map is showing: the point
+ * store is a separate dataset, so the worker matches the init by timestamp
+ * rather than assuming the two stores share an index. `requestId` lets stale
+ * replies be dropped and superseded reads aborted.
+ */
+export interface SampleRequest {
+  type: "sample";
+  requestId: number;
+  /** Grid column (0..nx-1) and row (0..ny-1), north-up row order. */
+  col: number;
+  row: number;
+  initTimeMs: number;
+}
+
+export type MainToWorker = OpenRequest | LoadAllRequest | PaintRequest | SampleRequest;
 
 export interface OpenedMessage {
   type: "opened";
@@ -87,10 +103,36 @@ export interface FatalErrorMessage {
   message: string;
 }
 
+/**
+ * The full point series for one location: values per lead hour, in °C. Arrays
+ * are transferred, and `leadHours` is parallel to them.
+ */
+export interface SampleSeriesMessage {
+  type: "sampleSeries";
+  requestId: number;
+  leadHours: number[];
+  temperatureC: Float32Array;
+  dewpointC: Float32Array;
+}
+
+/**
+ * The point series could not be read — including when the point store has no
+ * matching init, which would otherwise mean showing a different run's numbers
+ * than the map. `retryable` is false when re-requesting cannot help.
+ */
+export interface SampleFailedMessage {
+  type: "sampleFailed";
+  requestId: number;
+  retryable: boolean;
+  message: string;
+}
+
 export type WorkerToMain =
   | OpenedMessage
   | FrameLoadedMessage
   | PaintedMessage
   | ProgressMessage
   | FrameErrorMessage
+  | SampleSeriesMessage
+  | SampleFailedMessage
   | FatalErrorMessage;

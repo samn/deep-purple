@@ -114,6 +114,68 @@ export async function openHrrrDataset(
 }
 
 /**
+ * A time-optimized store, opened for single-cell time-series reads. Simpler
+ * than HrrrDataset: no GRIB codec, no completeness probing — the caller selects
+ * an init by timestamp so the readout matches whatever run the map is showing.
+ */
+export interface PointDataset {
+  store: IcechunkStore;
+  arrays: Map<string, zarr.Array<zarr.DataType, IcechunkStore>>;
+  /** All init times, ascending. */
+  initTimes: Date[];
+  /** Lead offsets in hours. */
+  leadTimeHours: number[];
+}
+
+export async function openPointDataset(
+  storeUrl: string,
+  variableNames: string[],
+): Promise<PointDataset> {
+  const store = await IcechunkStore.open(storeUrl, { branch: "main" });
+  const [initTimeSecs, leadTimeSecs] = await Promise.all([
+    readNumericArray(store, "/init_time"),
+    readNumericArray(store, "/lead_time"),
+  ]);
+  const arrays = new Map<string, zarr.Array<zarr.DataType, IcechunkStore>>();
+  await Promise.all(
+    variableNames.map(async (name) => {
+      arrays.set(name, await zarr.open(store.resolve(`/${name}`), { kind: "array" }));
+    }),
+  );
+  return {
+    store,
+    arrays,
+    initTimes: initTimeSecs.map((s) => new Date(s * 1000)),
+    leadTimeHours: leadTimeSecs.map((s) => s / 3600),
+  };
+}
+
+/**
+ * Read one grid cell across every lead time of an init. Chunks span the whole
+ * lead axis, so this is a single sharded read rather than one per lead.
+ */
+export async function loadPointSeries(
+  dataset: PointDataset,
+  variableName: string,
+  initIndex: number,
+  col: number,
+  row: number,
+  signal?: AbortSignal,
+): Promise<Float32Array> {
+  const arr = dataset.arrays.get(variableName);
+  if (!arr) throw new Error(`Array not opened: ${variableName}`);
+  const result = await zarr.get(
+    arr as zarr.Array<zarr.NumberDataType, IcechunkStore>,
+    [initIndex, null, row, col],
+    { opts: { signal } as never },
+  );
+  const src = result.data as ArrayLike<number>;
+  const out = new Float32Array(src.length);
+  for (let i = 0; i < src.length; i++) out[i] = src[i]!;
+  return out;
+}
+
+/**
  * Read one (init, lead) field as Float32Array in north-up row-major order,
  * with display-unit scaling applied.
  */

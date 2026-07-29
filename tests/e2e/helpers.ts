@@ -7,6 +7,8 @@ const FIXTURE_DIR = join(import.meta.dirname, "..", "fixtures", "http");
 interface FixtureManifest {
   initTimeMs: number;
   coarseLeads: number[];
+  /** Location whose point-readout series is recorded. */
+  point: { lon: number; lat: number };
   entries: {
     url: string;
     range: string;

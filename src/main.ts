@@ -1,10 +1,19 @@
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./style.css";
-import { BASEMAP_STYLE_URL, LAYERS, PRECIP_LAYER, SMOKE_LAYER, STORE_URL } from "./config.ts";
+import {
+  BASEMAP_STYLE_URL,
+  LAYERS,
+  PRECIP_LAYER,
+  READOUT_MAX_ATTEMPTS,
+  READOUT_RETRY_DELAY_MS,
+  SMOKE_LAYER,
+  STORE_URL,
+} from "./config.ts";
 import { makeLut, PRECIP_COLORMAP, SMOKE_COLORMAP } from "./lib/colormap.ts";
 import { FrameStore } from "./lib/frames.ts";
-import { HRRR_GRID } from "./lib/lcc.ts";
+import { HRRR_GRID, makeGridTransform } from "./lib/lcc.ts";
+import { PointSeries } from "./lib/pointSeries.ts";
 import { Timeline } from "./lib/timeline.ts";
 import { GpuForecastLayer, gpuRendererSupported } from "./render/gpuLayer.ts";
 import { ForecastLayer, type OverlayPlacement } from "./render/layer.ts";
@@ -45,8 +54,8 @@ const enabled = new Map<string, boolean>(LAYERS.map((l) => [l.id, true]));
 const ui = new AppUI(
   overlayRoot,
   [
-    { config: SMOKE_LAYER, colormap: SMOKE_COLORMAP, rangeText: "2–500 µg/m³" },
-    { config: PRECIP_LAYER, colormap: PRECIP_COLORMAP, rangeText: "0.1–100 mm/hr" },
+    { config: SMOKE_LAYER, colormap: SMOKE_COLORMAP },
+    { config: PRECIP_LAYER, colormap: PRECIP_COLORMAP },
   ],
   {
     onScrub: (t) => timeline.scrubTo(t),
@@ -94,6 +103,23 @@ worker.postMessage({
 
 let frameStore: FrameStore | null = null;
 let initTime: Date | null = null;
+let pointSeries: PointSeries | null = null;
+/**
+ * Grid cell being read for the readout, plus a monotonic id so replies for a
+ * superseded location are ignored (and its in-flight read aborted).
+ */
+let sampleCell: { col: number; row: number } | null = null;
+let sampleRequestId = 0;
+type SampleState = "idle" | "loading" | "loaded" | "failed" | "gaveUp";
+let sampleState: SampleState = "idle";
+let sampleAttempts = 0;
+/**
+ * The map's frames come first: the overlay is what the user is looking at, and
+ * it shares the worker and the connection with the point read. Sampling waits
+ * for the first (coarse) frame pass — the same point at which the animation
+ * becomes playable — so the readout can never delay the map appearing.
+ */
+let firstPassDone = false;
 const forecastLayers = new Map<string, ForecastLayer>();
 // GPU layers exist from startup so frames arriving before the basemap loads
 // are kept; they attach to the map in maybeAddLayers().
@@ -212,8 +238,89 @@ function updateTimeUI(): void {
   ui.setTime(valid, timeline.t, timeline.playing);
 }
 
+/**
+ * Request the point series once per location, then keep the readout in step
+ * with the timeline. The series covers every lead in one read, so this is a
+ * single fetch rather than per-lead sampling.
+ */
+function requestSeriesIfNeeded(): void {
+  if (!sampleCell || initTime === null || !firstPassDone) return;
+  if (sampleState === "loading" || sampleState === "loaded" || sampleState === "gaveUp") return;
+  sampleState = "loading";
+  sampleAttempts++;
+  worker.postMessage({
+    type: "sample",
+    requestId: sampleRequestId,
+    col: sampleCell.col,
+    row: sampleCell.row,
+    initTimeMs: initTime.getTime(),
+  } satisfies MainToWorker);
+}
+
+/**
+ * Repaint the readout for the current time. Shows a loading placeholder from
+ * the moment there is a location — including while the read is queued behind
+ * the map's first frame pass — so the row reserves its space and the user can
+ * see the values are coming.
+ */
+function refreshReadout(): void {
+  requestSeriesIfNeeded();
+  const reading = sampleCell && pointSeries ? pointSeries.reading(timeline.t) : null;
+  if (reading) ui.setReadout({ kind: "value", ...reading });
+  else if (sampleCell && sampleState !== "gaveUp") ui.setReadout({ kind: "loading" });
+  else ui.setReadout({ kind: "hidden" });
+}
+
+const gridTransform = makeGridTransform(HRRR_GRID);
+
+/**
+ * Point the readout at a location. Resolves lon/lat to a grid cell and drops
+ * points that fall outside the LCC grid — `inHrrrDomain` is a generous lon/lat
+ * box, so a fix near its corners (Bermuda, Baja) can sit off-grid, and
+ * clamping would silently report the weather hundreds of km away.
+ *
+ * Cached readings are kept when the fix resolves to the same cell: a repeat
+ * "locate" tap usually returns the same position, and re-sampling would cost
+ * megabytes per lead for identical values.
+ */
+function setSampleLocation(lon: number, lat: number): void {
+  const [colF, rowF] = gridTransform.lonLatToGrid(lon, lat);
+  const col = Math.round(colF);
+  const row = Math.round(rowF);
+  if (col < 0 || col >= HRRR_GRID.nx || row < 0 || row >= HRRR_GRID.ny) {
+    // Bump the id too: a reply still in flight for the previous cell must not
+    // land in the readout after we have decided this location has no data.
+    sampleCell = null;
+    sampleRequestId++;
+    sampleState = "idle";
+    sampleAttempts = 0;
+    pointSeries?.clear();
+    ui.setReadout({ kind: "hidden" });
+    return;
+  }
+  if (sampleCell && sampleCell.col === col && sampleCell.row === row) {
+    // Same cell: keep the series we already paid for. A fresh fix is also the
+    // natural moment to retry a read we had given up on — otherwise tapping
+    // locate can never bring the readout back, since geolocation returns the
+    // same cached position and nothing else resets the state.
+    if (sampleState === "gaveUp" || sampleState === "failed") {
+      sampleState = "idle";
+      sampleAttempts = 0;
+    }
+    refreshReadout();
+    return;
+  }
+  sampleCell = { col, row };
+  sampleRequestId++;
+  sampleState = "idle";
+  sampleAttempts = 0;
+  pointSeries?.clear();
+  refreshReadout();
+}
+
 timeline.onChange(() => {
   updateTimeUI();
+  refreshReadout();
   renderFrames();
 });
 
@@ -227,6 +334,9 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
         msg.leadHours,
       );
       frameStore.onFrame(renderFrames);
+      // Lead hours come from the point store with the series itself, since it is
+      // a separate dataset from the map's.
+      pointSeries = new PointSeries();
       placement = {
         width: msg.indexWidth,
         height: msg.indexHeight,
@@ -237,6 +347,9 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
       ui.setInit(initTime);
       ui.setStatus("Loading frames…", false);
       updateTimeUI();
+      // A location fix may already have arrived; kick off sampling for it now
+      // that the store (and lead grid) are known.
+      refreshReadout();
       maybeAddLayers();
       worker.postMessage({ type: "loadAll" } satisfies MainToWorker);
       break;
@@ -262,12 +375,40 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
     }
     case "progress": {
       ui.setProgress(msg.loaded, msg.total);
+      if (msg.firstPassDone && !firstPassDone) {
+        // Map is playable: the point read may now go ahead.
+        firstPassDone = true;
+        refreshReadout();
+      }
       if (msg.firstPassDone && !started) {
         started = true;
         ui.setStatus(null, false);
         if (autoplay) timeline.play();
         else updateTimeUI();
       }
+      break;
+    }
+    case "sampleSeries": {
+      // Drop a series read for a location the user has since moved away from.
+      if (msg.requestId !== sampleRequestId || !pointSeries) break;
+      sampleState = "loaded";
+      pointSeries.setSeries(msg.leadHours, msg.temperatureC, msg.dewpointC);
+      refreshReadout();
+      break;
+    }
+    case "sampleFailed": {
+      if (msg.requestId !== sampleRequestId) break;
+      // Retryable failures get another go on the next timeline move, bounded by
+      // READOUT_MAX_ATTEMPTS; past that (or when a retry cannot help) the
+      // placeholder is dropped rather than left spinning forever.
+      const spent = !msg.retryable || sampleAttempts >= READOUT_MAX_ATTEMPTS;
+      sampleState = spent ? "gaveUp" : "failed";
+      console.warn(`point readout unavailable: ${msg.message}`);
+      // Back off before retrying. refreshReadout runs on every timeline tick,
+      // so retrying from there would spend the whole budget within a frame or
+      // two of the first failure — no use against a transient error.
+      if (!spent) setTimeout(refreshReadout, READOUT_RETRY_DELAY_MS);
+      refreshReadout();
       break;
     }
     case "frameError": {
@@ -304,6 +445,7 @@ function requestLocation(fly: boolean): void {
       const { longitude, latitude } = pos.coords;
       if (!inHrrrDomain(longitude, latitude)) return;
       showLocationDot(longitude, latitude);
+      setSampleLocation(longitude, latitude);
       if (fly) {
         map.flyTo({ center: [longitude, latitude], zoom: LOCATED_ZOOM, duration: 1200 });
       } else {

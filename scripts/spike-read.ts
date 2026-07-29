@@ -5,6 +5,7 @@
  */
 import { PRECIP_LAYER, SMOKE_LAYER, STORE_URL } from "../src/config.ts";
 import { loadField, openHrrrDataset } from "../src/lib/store.ts";
+import { unitLabel } from "../src/lib/units.ts";
 
 let requests = 0;
 let bytes = 0;
@@ -40,7 +41,7 @@ for (const layer of [PRECIP_LAYER, SMOKE_LAYER]) {
   }
   console.log(
     `${layer.id}: ${ny}x${nx} in ${(performance.now() - t1).toFixed(0)}ms; ` +
-    `min=${min.toExponential(2)} max=${max.toExponential(2)} mean=${(sum / values.length).toExponential(2)} nan=${nan} ${layer.units}`,
+    `min=${min.toExponential(2)} max=${max.toExponential(2)} mean=${(sum / values.length).toExponential(2)} nan=${nan} ${unitLabel(layer.quantity, "metric")}`,
   );
 }
 console.log(`\ntotal: ${requests} requests, ${(bytes / 1024 / 1024).toFixed(2)}MB`);

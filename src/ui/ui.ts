@@ -4,6 +4,23 @@
  */
 import type { LayerConfig } from "../config.ts";
 import type { Colormap } from "../lib/colormap.ts";
+import {
+  formatRange,
+  formatTemperature,
+  loadUnitSystem,
+  saveUnitSystem,
+  type UnitSystem,
+} from "../lib/units.ts";
+
+/**
+ * What the readout should show. `loading` keeps the labels and stands a
+ * placeholder where each value will land, so the row doesn't jump when the
+ * numbers arrive; `hidden` is for no location at all.
+ */
+export type ReadoutState =
+  | { kind: "hidden" }
+  | { kind: "loading" }
+  | { kind: "value"; temperatureC: number; dewpointC: number };
 
 export interface UICallbacks {
   onScrub(t: number): void;
@@ -46,12 +63,21 @@ export class AppUI {
   private readonly progressBar: HTMLElement;
   private readonly progressWrap: HTMLElement;
   private readonly statusEl: HTMLElement;
+  private readonly readout: HTMLElement;
+  private readonly readoutTemp: HTMLElement;
+  private readonly readoutDew: HTMLElement;
+  private readonly unitBtn: HTMLButtonElement;
+  private readonly ranges = new Map<string, HTMLElement>();
   private readonly chips = new Map<string, HTMLButtonElement>();
+  private readonly layers: { config: LayerConfig; colormap: Colormap }[];
   private maxHours = 48;
+  private units: UnitSystem = loadUnitSystem();
+  /** Last state, kept so a unit switch can re-render without new data. */
+  private readoutState: ReadoutState = { kind: "hidden" };
 
   constructor(
     root: HTMLElement,
-    layers: { config: LayerConfig; colormap: Colormap; rangeText: string }[],
+    layers: { config: LayerConfig; colormap: Colormap }[],
     cb: UICallbacks,
   ) {
     this.cb = cb;
@@ -62,8 +88,9 @@ export class AppUI {
     this.initLabel = el("div", "init-label", titleBox);
     this.initLabel.textContent = "Loading forecast…";
 
+    this.layers = layers;
     const chipRow = el("div", "chip-row", top);
-    for (const { config, colormap, rangeText } of layers) {
+    for (const { config, colormap } of layers) {
       const chip = el("button", "chip chip-on", chipRow);
       chip.type = "button";
       chip.dataset.layer = config.id;
@@ -72,7 +99,7 @@ export class AppUI {
       label.textContent = config.label;
       const bar = el("span", "chip-gradient", chip);
       bar.style.background = colormapGradient(colormap);
-      el("span", "chip-range", chip).textContent = rangeText;
+      this.ranges.set(config.id, el("span", "chip-range", chip));
       chip.addEventListener("click", () => {
         const on = chip.classList.toggle("chip-on");
         chip.setAttribute("aria-pressed", String(on));
@@ -81,12 +108,22 @@ export class AppUI {
       this.chips.set(config.id, chip);
     }
 
-    const locate = el("button", "locate-btn", root);
+    // Map controls stack upwards from just above the attribution button, so the
+    // unit toggle sits directly above it and the locate button above that.
+    const controls = el("div", "map-controls", root);
+    const locate = el("button", "locate-btn", controls);
     locate.type = "button";
     locate.title = "Center on my location";
     locate.setAttribute("aria-label", "Center on my location");
     locate.innerHTML = "&#9678;";
     locate.addEventListener("click", () => this.cb.onLocate());
+
+    this.unitBtn = el("button", "unit-btn", controls);
+    this.unitBtn.type = "button";
+    this.unitBtn.addEventListener("click", () => {
+      this.setUnits(this.units === "metric" ? "imperial" : "metric");
+      saveUnitSystem(this.units);
+    });
 
     const bottom = el("div", "bottom-bar", root);
     const timeRow = el("div", "time-row", bottom);
@@ -99,6 +136,21 @@ export class AppUI {
     this.timeLabel = el("div", "time-label", labels);
     this.timeLabel.textContent = "—";
     this.relLabel = el("div", "rel-label", labels);
+
+    // Forecast at the located point, sharing the time row so it reads as part
+    // of "what the map is showing right now". Hidden until there is both a fix
+    // and a value.
+    //
+    // Deliberately NOT an aria-live region: the values track the timeline, so
+    // during playback a live region would queue an announcement several times a
+    // second and drown out everything else. role="group" gives it a name
+    // assistive tech will actually use — ARIA forbids naming a plain div, whose
+    // implicit role is `generic`.
+    this.readout = el("div", "readout readout-hidden", timeRow);
+    this.readout.setAttribute("role", "group");
+    this.readout.setAttribute("aria-label", "Forecast at your location");
+    this.readoutTemp = this.addMetric("temp", "Temp");
+    this.readoutDew = this.addMetric("dew", "Dew");
 
     const sliderWrap = el("div", "slider-wrap", bottom);
     this.slider = el("input", "scrubber", sliderWrap);
@@ -123,6 +175,66 @@ export class AppUI {
 
     this.statusEl = el("div", "status", root);
     this.setStatus("Loading forecast…", false);
+
+    this.trackBarHeight(bottom);
+
+    // Paints the unit-dependent text (chip ranges, toggle label) for the
+    // persisted preference.
+    this.setUnits(this.units);
+  }
+
+  /**
+   * Publish the bottom bar's height as --bar-h, which positions the map
+   * controls and MapLibre's attribution. The bar is not a fixed height: it
+   * grows if the readout wraps, and with safe-area insets.
+   */
+  private trackBarHeight(bar: HTMLElement): void {
+    const apply = () => {
+      const h = Math.round(bar.getBoundingClientRect().height);
+      if (h > 0) document.documentElement.style.setProperty("--bar-h", `${h}px`);
+    };
+    if (typeof ResizeObserver === "function") new ResizeObserver(apply).observe(bar);
+    else window.addEventListener("resize", apply);
+    apply();
+  }
+
+  /** One labelled metric in the readout; returns the element holding its value. */
+  private addMetric(key: string, label: string): HTMLElement {
+    const metric = el("span", "readout-metric", this.readout);
+    metric.dataset.metric = key;
+    el("span", "readout-label", metric).textContent = label;
+    return el("span", "readout-value", metric);
+  }
+
+  /**
+   * Switch the displayed unit system. Only formatting changes — loaded frames,
+   * colormap thresholds and the store all stay metric — so this just repaints
+   * the legend ranges and the readout from values already in hand.
+   */
+  setUnits(system: UnitSystem): void {
+    this.units = system;
+    const imperial = system === "imperial";
+    this.unitBtn.textContent = imperial ? "°F" : "°C";
+    this.unitBtn.title = imperial ? "Switch to metric units" : "Switch to imperial units";
+    this.unitBtn.setAttribute(
+      "aria-label",
+      imperial ? "Switch to metric units" : "Switch to imperial units",
+    );
+    // A toggle, not a mode indicator: report which of the two states is active.
+    this.unitBtn.setAttribute("aria-pressed", String(imperial));
+    this.unitBtn.dataset.units = system;
+    for (const { config } of this.layers) {
+      const target = this.ranges.get(config.id);
+      if (target) {
+        target.textContent = formatRange(
+          config.range[0],
+          config.range[1],
+          config.quantity,
+          system,
+        );
+      }
+    }
+    this.renderReadout();
   }
 
   setMaxHours(h: number): void {
@@ -155,6 +267,31 @@ export class AppUI {
     }
     this.playBtn.innerHTML = playing ? PAUSE_ICON : PLAY_ICON;
     this.playBtn.setAttribute("aria-label", playing ? "Pause animation" : "Play animation");
+  }
+
+  /** Show, hide, or show a loading placeholder for the located-point readout. */
+  setReadout(state: ReadoutState): void {
+    this.readoutState = state;
+    this.renderReadout();
+  }
+
+  /**
+   * Paint the readout in the current unit system. Runs on every timeline change,
+   * so the formatted strings are diffed and the DOM is only touched when a
+   * displayed value actually changes.
+   */
+  private renderReadout(): void {
+    const state = this.readoutState;
+    this.readout.classList.toggle("readout-hidden", state.kind === "hidden");
+    this.readout.classList.toggle("readout-loading", state.kind === "loading");
+    if (state.kind === "loading") this.readout.setAttribute("aria-busy", "true");
+    else this.readout.removeAttribute("aria-busy");
+    // Empty values while loading so the placeholder boxes show through; they
+    // keep the text's footprint, so nothing shifts when the numbers land.
+    const temp = state.kind === "value" ? formatTemperature(state.temperatureC, this.units) : "";
+    const dew = state.kind === "value" ? formatTemperature(state.dewpointC, this.units) : "";
+    if (this.readoutTemp.textContent !== temp) this.readoutTemp.textContent = temp;
+    if (this.readoutDew.textContent !== dew) this.readoutDew.textContent = dew;
   }
 
   setProgress(loaded: number, total: number): void {
