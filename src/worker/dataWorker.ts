@@ -4,11 +4,11 @@
  * reprojection index map, and the palette LUTs all live here so the main
  * thread only ever blits finished pixels.
  */
-import { LAYERS, LOAD_PASSES, POINT_VARIABLES, TEMPERATURE_VARIABLE, DEWPOINT_VARIABLE, type LayerConfig } from "../config.ts";
+import { LAYERS, LOAD_PASSES, POINT_STORE_URL, POINT_VARIABLES, TEMPERATURE_VARIABLE, DEWPOINT_VARIABLE, type LayerConfig } from "../config.ts";
 import { makeLut, makeQuantizer, quantizeField, PRECIP_COLORMAP, SMOKE_COLORMAP, type Quantizer } from "../lib/colormap.ts";
 import { HRRR_GRID } from "../lib/lcc.ts";
 import { buildIndexMap, paintFrame, type IndexMap } from "../lib/reproject.ts";
-import { loadField, loadPoint, openArrays, openHrrrDataset, type HrrrDataset } from "../lib/store.ts";
+import { loadField, loadPointSeries, openHrrrDataset, openPointDataset, type HrrrDataset, type PointDataset } from "../lib/store.ts";
 import type { MainToWorker, PaintRequest, SampleRequest, WorkerToMain } from "./protocol.ts";
 import { progressiveLeadOrder } from "./schedule.ts";
 
@@ -160,77 +160,77 @@ function handlePaint(req: PaintRequest): void {
 }
 
 /**
- * Open the point-readout arrays on first use. Kept out of the initial store
- * handshake so a store that lacks these variables (or an offline test without
- * fixtures for them) still loads the map. A failed attempt is *not* memoized —
- * a transient network error must not disable the readout for the session.
+ * The time-optimized point store, opened on first use. Kept separate from the
+ * map's store and out of the initial handshake: the map must not wait on it,
+ * and a store that can't be reached should cost nothing but the readout. A
+ * failed attempt is not memoized, so a transient error can self-heal.
  */
-let pointArrays: Promise<void> | null = null;
-function ensurePointArrays(ds: HrrrDataset): Promise<void> {
-  pointArrays ??= openArrays(
-    ds,
-    POINT_VARIABLES.map((v) => ({ name: v.arrayName, scale: 1 })),
+let pointDataset: Promise<PointDataset> | null = null;
+function ensurePointDataset(): Promise<PointDataset> {
+  pointDataset ??= openPointDataset(
+    POINT_STORE_URL,
+    POINT_VARIABLES.map((v) => v.arrayName),
   ).catch((e: unknown) => {
-    pointArrays = null;
+    pointDataset = null;
     throw e;
   });
-  return pointArrays;
+  return pointDataset;
 }
 
-/** Aborts the in-flight sample fetches of a superseded location. */
+/** Aborts the in-flight read of a superseded location. */
 let sampleAbort: { requestId: number; controller: AbortController } | null = null;
 
 /**
- * Sample temperature + dew point at one grid cell for the requested leads.
- * Every lead gets exactly one reply — `sample` or `sampleFailed` — so the main
- * thread's in-flight bookkeeping can never wedge. Failures are per-lead and
- * non-fatal: the map keeps working without the readout.
+ * Read the whole temperature + dew point series at one cell. Answers with
+ * exactly one message so the main thread's bookkeeping can never wedge; the
+ * map keeps working regardless of what happens here.
  */
 async function handleSample(req: SampleRequest): Promise<void> {
-  const ds = dataset;
-  const failAll = (retryable: boolean, message: string) => {
-    for (const leadIndex of req.leads) {
-      post({ type: "sampleFailed", requestId: req.requestId, leadIndex, retryable, message });
-    }
-  };
-  if (!ds) {
-    failAll(true, "store not opened");
-    return;
-  }
+  const fail = (retryable: boolean, message: string) =>
+    post({ type: "sampleFailed", requestId: req.requestId, retryable, message });
 
-  // A new location supersedes the previous one: stop paying for its fetches.
   if (!sampleAbort || sampleAbort.requestId !== req.requestId) {
     sampleAbort?.controller.abort();
     sampleAbort = { requestId: req.requestId, controller: new AbortController() };
   }
   const { signal } = sampleAbort.controller;
 
+  let ds: PointDataset;
   try {
-    await ensurePointArrays(ds);
+    ds = await ensurePointDataset();
   } catch (e) {
-    failAll(true, `point variables unavailable: ${e instanceof Error ? e.message : String(e)}`);
+    fail(true, `point store unavailable: ${e instanceof Error ? e.message : String(e)}`);
     return;
   }
 
-  await Promise.all(
-    req.leads.map(async (leadIndex) => {
-      try {
-        const [temperatureC, dewpointC] = await Promise.all([
-          loadPoint(ds, { name: TEMPERATURE_VARIABLE.arrayName, scale: 1 }, ds.latestInitIndex, leadIndex, req.col, req.row, signal),
-          loadPoint(ds, { name: DEWPOINT_VARIABLE.arrayName, scale: 1 }, ds.latestInitIndex, leadIndex, req.col, req.row, signal),
-        ]);
-        // A masked or missing cell will never become a number on retry.
-        if (!Number.isFinite(temperatureC) || !Number.isFinite(dewpointC)) {
-          post({ type: "sampleFailed", requestId: req.requestId, leadIndex, retryable: false, message: "no data at cell" });
-          return;
-        }
-        post({ type: "sample", requestId: req.requestId, leadIndex, temperatureC, dewpointC });
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        post({ type: "sampleFailed", requestId: req.requestId, leadIndex, retryable: !signal.aborted, message });
-      }
-    }),
-  );
+  // Match the map's run by timestamp: the two stores are published separately,
+  // so an index that is right for one can be wrong for the other, and showing a
+  // different run's numbers beside the map would be worse than showing none.
+  const initIndex = ds.initTimes.findIndex((d) => d.getTime() === req.initTimeMs);
+  if (initIndex === -1) {
+    fail(true, `point store has no init at ${new Date(req.initTimeMs).toISOString()}`);
+    return;
+  }
+
+  try {
+    const [temperatureC, dewpointC] = await Promise.all([
+      loadPointSeries(ds, TEMPERATURE_VARIABLE.arrayName, initIndex, req.col, req.row, signal),
+      loadPointSeries(ds, DEWPOINT_VARIABLE.arrayName, initIndex, req.col, req.row, signal),
+    ]);
+    post(
+      {
+        type: "sampleSeries",
+        requestId: req.requestId,
+        leadHours: ds.leadTimeHours,
+        temperatureC,
+        dewpointC,
+      },
+      [temperatureC.buffer, dewpointC.buffer],
+    );
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    fail(!signal.aborted, message);
+  }
 }
 
 self.onmessage = (ev: MessageEvent<MainToWorker>) => {

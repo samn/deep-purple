@@ -6,7 +6,6 @@ import {
   LAYERS,
   PRECIP_LAYER,
   READOUT_MAX_ATTEMPTS,
-  READOUT_MAX_INFLIGHT,
   SMOKE_LAYER,
   STORE_URL,
 } from "./config.ts";
@@ -105,15 +104,21 @@ let frameStore: FrameStore | null = null;
 let initTime: Date | null = null;
 let pointSeries: PointSeries | null = null;
 /**
- * Grid cell being sampled for the readout, plus a monotonic id so replies for
- * a superseded location are ignored (and its in-flight fetches aborted).
+ * Grid cell being read for the readout, plus a monotonic id so replies for a
+ * superseded location are ignored (and its in-flight read aborted).
  */
 let sampleCell: { col: number; row: number } | null = null;
 let sampleRequestId = 0;
-/** Leads awaiting a reply, leads given up on, and per-lead attempt counts. */
-const sampleInFlight = new Set<number>();
-const sampleUnavailable = new Set<number>();
-const sampleAttempts = new Map<number, number>();
+type SampleState = "idle" | "loading" | "loaded" | "failed";
+let sampleState: SampleState = "idle";
+let sampleAttempts = 0;
+/**
+ * The map's frames come first: the overlay is what the user is looking at, and
+ * it shares the worker and the connection with the point read. Sampling waits
+ * for the first (coarse) frame pass — the same point at which the animation
+ * becomes playable — so the readout can never delay the map appearing.
+ */
+let firstPassDone = false;
 const forecastLayers = new Map<string, ForecastLayer>();
 // GPU layers exist from startup so frames arriving before the basemap loads
 // are kept; they attach to the map in maybeAddLayers().
@@ -233,38 +238,29 @@ function updateTimeUI(): void {
 }
 
 /**
- * Update the top-right temperature/dew-point readout for the current time,
- * requesting the sampleable leads bracketing it. No-ops (and hides the box)
- * until we have both a location and an open store.
- *
- * Sampling is deliberately stingy: only stride-aligned leads are eligible
- * (READOUT_LEAD_STRIDE_HOURS) and at most READOUT_MAX_INFLIGHT requests run at
- * once, because each lead costs a whole-grid GRIB message per variable and
- * must not outbid the frame loader for bandwidth.
+ * Request the point series once per location, then keep the readout in step
+ * with the timeline. The series covers every lead in one read, so this is a
+ * single fetch rather than per-lead sampling.
  */
+function requestSeriesIfNeeded(): void {
+  if (!sampleCell || initTime === null || !firstPassDone) return;
+  if (sampleState === "loading" || sampleState === "loaded") return;
+  if (sampleState === "failed" && sampleAttempts >= READOUT_MAX_ATTEMPTS) return;
+  sampleState = "loading";
+  sampleAttempts++;
+  worker.postMessage({
+    type: "sample",
+    requestId: sampleRequestId,
+    col: sampleCell.col,
+    row: sampleCell.row,
+    initTimeMs: initTime.getTime(),
+  } satisfies MainToWorker);
+}
+
+/** Repaint the readout for the current time, hiding it when there is no data. */
 function refreshReadout(): void {
-  const series = pointSeries;
-  if (!series || !sampleCell) {
-    ui.setReadout(null);
-    return;
-  }
-  const [a, b] = series.bracket(timeline.t);
-  const need = (a === b ? [a] : [a, b]).filter(
-    (li) => !series.has(li) && !sampleInFlight.has(li) && !sampleUnavailable.has(li),
-  );
-  const budget = READOUT_MAX_INFLIGHT - sampleInFlight.size;
-  const take = need.slice(0, Math.max(0, budget));
-  if (take.length > 0) {
-    for (const li of take) sampleInFlight.add(li);
-    worker.postMessage({
-      type: "sample",
-      requestId: sampleRequestId,
-      col: sampleCell.col,
-      row: sampleCell.row,
-      leads: take,
-    } satisfies MainToWorker);
-  }
-  ui.setReadout(series.reading(timeline.t));
+  requestSeriesIfNeeded();
+  ui.setReadout(sampleCell && pointSeries ? pointSeries.reading(timeline.t) : null);
 }
 
 const gridTransform = makeGridTransform(HRRR_GRID);
@@ -294,9 +290,8 @@ function setSampleLocation(lon: number, lat: number): void {
   }
   sampleCell = { col, row };
   sampleRequestId++;
-  sampleInFlight.clear();
-  sampleUnavailable.clear();
-  sampleAttempts.clear();
+  sampleState = "idle";
+  sampleAttempts = 0;
   pointSeries?.clear();
   refreshReadout();
 }
@@ -317,7 +312,9 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
         msg.leadHours,
       );
       frameStore.onFrame(renderFrames);
-      pointSeries = new PointSeries(msg.leadHours);
+      // Lead hours come from the point store with the series itself, since it is
+      // a separate dataset from the map's.
+      pointSeries = new PointSeries();
       placement = {
         width: msg.indexWidth,
         height: msg.indexHeight,
@@ -356,6 +353,11 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
     }
     case "progress": {
       ui.setProgress(msg.loaded, msg.total);
+      if (msg.firstPassDone && !firstPassDone) {
+        // Map is playable: the point read may now go ahead.
+        firstPassDone = true;
+        refreshReadout();
+      }
       if (msg.firstPassDone && !started) {
         started = true;
         ui.setStatus(null, false);
@@ -364,34 +366,21 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
       }
       break;
     }
-    case "sample": {
-      // Ignore samples for a superseded location.
+    case "sampleSeries": {
+      // Drop a series read for a location the user has since moved away from.
       if (msg.requestId !== sampleRequestId || !pointSeries) break;
-      sampleInFlight.delete(msg.leadIndex);
-      sampleAttempts.delete(msg.leadIndex);
-      pointSeries.set(msg.leadIndex, { temperatureC: msg.temperatureC, dewpointC: msg.dewpointC });
+      sampleState = "loaded";
+      pointSeries.setSeries(msg.leadHours, msg.temperatureC, msg.dewpointC);
       ui.setReadout(pointSeries.reading(timeline.t));
-      // A slot freed up; pick up any lead still needed for the current time.
-      refreshReadout();
       break;
     }
     case "sampleFailed": {
       if (msg.requestId !== sampleRequestId) break;
-      sampleInFlight.delete(msg.leadIndex);
-      // A retryable lead stays eligible so a transient error can self-heal —
-      // but only for a few attempts. refreshReadout runs on every timeline
-      // tick, so an endlessly retryable lead would be re-requested ~60x a
-      // second, each attempt costing a whole-grid chunk read per variable.
-      const attempts = (sampleAttempts.get(msg.leadIndex) ?? 0) + 1;
-      sampleAttempts.set(msg.leadIndex, attempts);
-      if (!msg.retryable || attempts >= READOUT_MAX_ATTEMPTS) {
-        sampleUnavailable.add(msg.leadIndex);
-      }
-      console.warn(`sample @${msg.leadIndex} unavailable (attempt ${attempts}): ${msg.message}`);
-      // Use the freed slot: retries the lead (up to the attempt cap) and picks
-      // up its sibling bracket, so a paused timeline still recovers instead of
-      // waiting for the next user interaction.
-      refreshReadout();
+      // Retryable failures get another go on the next timeline move, bounded by
+      // READOUT_MAX_ATTEMPTS; otherwise the readout simply stays hidden.
+      sampleState = msg.retryable ? "failed" : "loaded";
+      if (!msg.retryable) sampleAttempts = READOUT_MAX_ATTEMPTS;
+      console.warn(`point readout unavailable: ${msg.message}`);
       break;
     }
     case "frameError": {

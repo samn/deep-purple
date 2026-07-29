@@ -114,53 +114,65 @@ export async function openHrrrDataset(
 }
 
 /**
- * Open additional arrays into an already-open dataset (e.g. point-readout
- * variables that aren't needed for the initial store handshake). Idempotent:
- * arrays already present are skipped.
+ * A time-optimized store, opened for single-cell time-series reads. Simpler
+ * than HrrrDataset: no GRIB codec, no completeness probing — the caller selects
+ * an init by timestamp so the readout matches whatever run the map is showing.
  */
-export async function openArrays(
-  dataset: HrrrDataset,
-  variables: VariableSpec[],
-): Promise<void> {
+export interface PointDataset {
+  store: IcechunkStore;
+  arrays: Map<string, zarr.Array<zarr.DataType, IcechunkStore>>;
+  /** All init times, ascending. */
+  initTimes: Date[];
+  /** Lead offsets in hours. */
+  leadTimeHours: number[];
+}
+
+export async function openPointDataset(
+  storeUrl: string,
+  variableNames: string[],
+): Promise<PointDataset> {
+  const store = await IcechunkStore.open(storeUrl, { branch: "main" });
+  const [initTimeSecs, leadTimeSecs] = await Promise.all([
+    readNumericArray(store, "/init_time"),
+    readNumericArray(store, "/lead_time"),
+  ]);
+  const arrays = new Map<string, zarr.Array<zarr.DataType, IcechunkStore>>();
   await Promise.all(
-    variables.map(async (v) => {
-      if (dataset.arrays.has(v.name)) return;
-      const arr = await zarr.open(dataset.store.resolve(`/${v.name}`), { kind: "array" });
-      dataset.arrays.set(v.name, arr);
+    variableNames.map(async (name) => {
+      arrays.set(name, await zarr.open(store.resolve(`/${name}`), { kind: "array" }));
     }),
   );
+  return {
+    store,
+    arrays,
+    initTimes: initTimeSecs.map((s) => new Date(s * 1000)),
+    leadTimeHours: leadTimeSecs.map((s) => s / 3600),
+  };
 }
 
 /**
- * Read a single cell of one (init, lead) field. The store chunks whole grids,
- * so this still transfers and decodes a full GRIB message — but unlike
- * loadField it doesn't allocate a second full-grid Float32Array or scale ~1.9M
- * values to reach one of them.
+ * Read one grid cell across every lead time of an init. Chunks span the whole
+ * lead axis, so this is a single sharded read rather than one per lead.
  */
-export async function loadPoint(
-  dataset: HrrrDataset,
-  variable: VariableSpec,
+export async function loadPointSeries(
+  dataset: PointDataset,
+  variableName: string,
   initIndex: number,
-  leadIndex: number,
   col: number,
   row: number,
   signal?: AbortSignal,
-): Promise<number> {
-  const arr = dataset.arrays.get(variable.name);
-  if (!arr) throw new Error(`Array not opened: ${variable.name}`);
+): Promise<Float32Array> {
+  const arr = dataset.arrays.get(variableName);
+  if (!arr) throw new Error(`Array not opened: ${variableName}`);
   const result = await zarr.get(
     arr as zarr.Array<zarr.NumberDataType, IcechunkStore>,
-    [initIndex, leadIndex, null, null],
+    [initIndex, null, row, col],
     { opts: { signal } as never },
   );
-  const src = result.data as Float64Array | Float32Array;
-  const [ny, nx] = result.shape as [number, number];
-  if (col < 0 || col >= nx || row < 0 || row >= ny) {
-    throw new Error(`Cell ${col},${row} outside ${nx}x${ny} grid`);
-  }
-  const value = src[row * nx + col];
-  if (value === undefined) throw new Error(`No value at cell ${col},${row}`);
-  return value * variable.scale;
+  const src = result.data as ArrayLike<number>;
+  const out = new Float32Array(src.length);
+  for (let i = 0; i < src.length; i++) out[i] = src[i]!;
+  return out;
 }
 
 /**

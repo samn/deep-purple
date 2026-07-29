@@ -2,27 +2,24 @@ import { expect, test } from "@playwright/test";
 import { fixtureManifest, gotoApp, routeFixtures, waitForLoaded } from "./helpers.ts";
 
 /**
- * The recorded fixtures only hold temperature/dew-point bodies for the leads in
- * the manifest's `pointLeads`, so the readout is asserted at exactly those
- * forecast hours. Values below are what the pinned init holds at DENVER; if you
- * re-record with `--fresh` they change and must be updated (there is no
- * snapshot to auto-refresh).
+ * The point readout comes from the time-optimized store, which returns the
+ * whole 48-hour series in one read — so every forecast hour is assertable, not
+ * just a recorded subset. Values below are what the pinned init holds at the
+ * recorded location; re-recording with `--fresh` changes them and they must be
+ * updated by hand (there is no snapshot to auto-refresh).
  */
-const DENVER = { longitude: -104.99, latitude: 39.74 };
-const [FIRST_LEAD, SCRUB_LEAD] = fixtureManifest.pointLeads;
-const AT_FIRST = { temp: "31°C", dew: "10°C" };
-const AT_SCRUB = { temp: "33°C", dew: "4°C" };
+const DENVER = {
+  longitude: fixtureManifest.point.lon,
+  latitude: fixtureManifest.point.lat,
+};
+const AT_0H = { temp: "31°C", dew: "10°C" };
+const AT_12H = { temp: "22°C", dew: "11°C" };
+const AT_30H = { temp: "33°C", dew: "4°C" };
 
 const readout = ".readout";
 const tempValue = '.readout-metric[data-metric="temp"] .readout-value';
 const dewValue = '.readout-metric[data-metric="dew"] .readout-value';
 const unitBtn = ".unit-btn";
-
-test.beforeEach(() => {
-  // Guards the constants above against a fixture re-record that changes leads.
-  expect(FIRST_LEAD).toBe(0);
-  expect(SCRUB_LEAD).toBe(30);
-});
 
 test.describe("forecast readout with a location", () => {
   test.use({ geolocation: DENVER, permissions: ["geolocation"] });
@@ -35,8 +32,8 @@ test.describe("forecast readout with a location", () => {
 
   test("shows temperature and dew point for the located point", async ({ page }) => {
     await expect(page.locator(readout)).toBeVisible();
-    await expect(page.locator(tempValue)).toHaveText(AT_FIRST.temp);
-    await expect(page.locator(dewValue)).toHaveText(AT_FIRST.dew);
+    await expect(page.locator(tempValue)).toHaveText(AT_0H.temp);
+    await expect(page.locator(dewValue)).toHaveText(AT_0H.dew);
     // Named for assistive tech. role=group is required for the name to stick:
     // ARIA forbids naming a plain div (implicit role `generic`).
     await expect(page.locator(readout)).toHaveAttribute("role", "group");
@@ -73,22 +70,36 @@ test.describe("forecast readout with a location", () => {
   });
 
   test("updates when the timeline is scrubbed", async ({ page }) => {
-    await expect(page.locator(tempValue)).toHaveText(AT_FIRST.temp);
+    await expect(page.locator(tempValue)).toHaveText(AT_0H.temp);
 
-    await page.locator(".scrubber").fill(String(SCRUB_LEAD));
-    await expect(page.locator(".rel-label")).toHaveText(`+${SCRUB_LEAD}h`);
+    await page.locator(".scrubber").fill("30");
+    await expect(page.locator(".rel-label")).toHaveText("+30h");
 
-    await expect(page.locator(tempValue)).toHaveText(AT_SCRUB.temp);
-    await expect(page.locator(dewValue)).toHaveText(AT_SCRUB.dew);
+    await expect(page.locator(tempValue)).toHaveText(AT_30H.temp);
+    await expect(page.locator(dewValue)).toHaveText(AT_30H.dew);
     // Never blanks mid-scrub: it holds the previous sample until the new one
     // lands, rather than hiding while the fetch is in flight.
     await expect(page.locator(readout)).toBeVisible();
   });
 
+  test("resolves every forecast hour, not just a coarse subset", async ({ page }) => {
+    // The time-optimized store returns all 49 leads in one read, so a lead that
+    // is not on any coarse stride still reads exactly.
+    await page.locator(".scrubber").fill("12");
+    await expect(page.locator(".rel-label")).toHaveText("+12h");
+    await expect(page.locator(tempValue)).toHaveText(AT_12H.temp);
+    await expect(page.locator(dewValue)).toHaveText(AT_12H.dew);
+
+    // And an hour between leads interpolates between its neighbours rather than
+    // snapping to one of them.
+    await page.locator(".scrubber").fill("12.5");
+    const between = await page.locator(tempValue).textContent();
+    expect(between).toMatch(/^\d+°C$/);
+  });
+
   test("keeps a value on screen throughout autoplay", async ({ page }) => {
-    // Autoplay is the production default, and playback walks the timeline past
-    // leads with no recorded fixture — the readout must degrade to the nearest
-    // sampled value rather than flicker or disappear.
+    // Autoplay is the production default. The whole series is already in hand,
+    // so the readout tracks playback without further fetching.
     await page.locator(".play-btn").click();
     await expect(page.locator(".play-btn")).toHaveAttribute("aria-label", "Pause animation");
 
@@ -98,6 +109,35 @@ test.describe("forecast readout with a location", () => {
       await page.waitForTimeout(250);
     }
     await expect(page.locator(".rel-label")).not.toHaveText("+0h");
+  });
+});
+
+test.describe("loading priority", () => {
+  test.use({ geolocation: DENVER, permissions: ["geolocation"] });
+
+  test("loads the map's frames before the point readout", async ({ context, page }) => {
+    // The overlay is what the user is looking at, and it shares the worker and
+    // connection with the point read — so frames must go first.
+    const order: string[] = [];
+    page.on("request", (req) => {
+      const url = req.url();
+      // Frame data: virtual chunks resolve to NOAA's GRIB archive.
+      if (url.includes("noaa-hrrr-bdp-pds")) order.push("frame");
+      // Any request to the separate time-optimized store is the readout.
+      else if (url.includes("noaa-hrrr-forecast-48-hour/v0.1.0")) order.push("point");
+    });
+
+    await routeFixtures(context);
+    await gotoApp(page);
+    await waitForLoaded(page);
+    await expect(page.locator(readout)).toBeVisible();
+
+    const firstPoint = order.indexOf("point");
+    expect(firstPoint).toBeGreaterThan(-1);
+    const framesFirst = order.slice(0, firstPoint).filter((k) => k === "frame").length;
+    // The first progressive pass is 9 coarse leads x 2 layers; all of it is
+    // requested before the readout touches the network.
+    expect(framesFirst).toBeGreaterThanOrEqual(18);
   });
 });
 

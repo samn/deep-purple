@@ -35,12 +35,11 @@ export interface PaintRequest {
 }
 
 /**
- * Sample temperature + dew point at one grid cell for the given lead indices.
- * Chunks are whole-grid, so there's one chunk fetch per lead per variable
- * regardless of how few cells we read. The caller resolves lon/lat to an
- * in-range cell (so out-of-grid points are rejected before any fetch) and
- * bumps `requestId` when the location changes, which both discards stale
- * replies and aborts the superseded fetches.
+ * Fetch the whole temperature + dew point series at one grid cell from the
+ * time-optimized store. `initTimeMs` is the run the map is showing: the point
+ * store is a separate dataset, so the worker matches the init by timestamp
+ * rather than assuming the two stores share an index. `requestId` lets stale
+ * replies be dropped and superseded reads aborted.
  */
 export interface SampleRequest {
   type: "sample";
@@ -48,7 +47,7 @@ export interface SampleRequest {
   /** Grid column (0..nx-1) and row (0..ny-1), north-up row order. */
   col: number;
   row: number;
-  leads: number[];
+  initTimeMs: number;
 }
 
 export type MainToWorker = OpenRequest | LoadAllRequest | PaintRequest | SampleRequest;
@@ -104,26 +103,26 @@ export interface FatalErrorMessage {
   message: string;
 }
 
-/** One (init, lead) point sample: temperature + dew point at the location, °C. */
-export interface SampleResultMessage {
-  type: "sample";
+/**
+ * The full point series for one location: values per lead hour, in °C. Arrays
+ * are transferred, and `leadHours` is parallel to them.
+ */
+export interface SampleSeriesMessage {
+  type: "sampleSeries";
   requestId: number;
-  leadIndex: number;
-  temperatureC: number;
-  dewpointC: number;
+  leadHours: number[];
+  temperatureC: Float32Array;
+  dewpointC: Float32Array;
 }
 
 /**
- * A requested sample could not be produced. Sent for every failed lead —
- * including aborted, missing-array and non-finite-value cases — so the main
- * thread can drop its in-flight marker and retry the lead later instead of
- * wedging it forever. `retryable` is false when re-requesting is pointless
- * (e.g. the cell has no data at all).
+ * The point series could not be read — including when the point store has no
+ * matching init, which would otherwise mean showing a different run's numbers
+ * than the map. `retryable` is false when re-requesting cannot help.
  */
 export interface SampleFailedMessage {
   type: "sampleFailed";
   requestId: number;
-  leadIndex: number;
   retryable: boolean;
   message: string;
 }
@@ -134,6 +133,6 @@ export type WorkerToMain =
   | PaintedMessage
   | ProgressMessage
   | FrameErrorMessage
-  | SampleResultMessage
+  | SampleSeriesMessage
   | SampleFailedMessage
   | FatalErrorMessage;

@@ -69,26 +69,25 @@ export const DEWPOINT_VARIABLE: PointVariable = {
 export const POINT_VARIABLES: PointVariable[] = [TEMPERATURE_VARIABLE, DEWPOINT_VARIABLE];
 
 /**
- * Sample the readout only at leads on this hour stride (0, 6, 12, … plus the
- * final lead). Chunks are whole-grid, so every extra lead costs a full GRIB
- * message *per variable* (~1.25 MB) — sampling all 49 leads during one
- * playthrough would pull ~118 MB, more than the whole rest of the app. A
- * 6-hour stride caps the readout at 9 leads (~22 MB worst case, and only for
- * the leads actually visited) while still resolving the diurnal swing; values
- * in between are interpolated by PointSeries.
+ * Time-optimized companion store for the point readout
+ * (dynamical.org/catalog/noaa-hrrr-forecast-48-hour).
+ *
+ * The map reads the *map-optimized* virtual store, whose chunks are one whole
+ * grid per (init, lead) — ideal for painting a frame, terrible for one cell:
+ * 49 leads x 2 variables would be ~118 MB of GRIB to read 98 numbers. This
+ * store holds the same forecast rechunked with all 49 lead times together and
+ * sharded across y/x, so a single cell's entire 48-hour series is one ~3 MB
+ * inner-chunk read per variable — the whole readout costs ~6 MB at full hourly
+ * resolution. Values arrive in °C, float32, blosc/zstd (no GRIB decode).
  */
-export const READOUT_LEAD_STRIDE_HOURS = 6;
-
-/** Max concurrent point-sample requests, so sampling can't starve frame loading. */
-export const READOUT_MAX_INFLIGHT = 2;
+export const POINT_STORE_URL =
+  "https://dynamical-noaa-hrrr.s3.us-west-2.amazonaws.com/noaa-hrrr-forecast-48-hour/v0.1.0.icechunk";
 
 /**
- * Attempts allowed per lead before it is given up on for the current location.
- * A retryable failure frees the lead for another try, and refreshReadout runs
- * on every timeline tick — without a cap that becomes a request loop against a
- * lead the store simply can't serve.
+ * Attempts allowed for the point series before giving up for this location.
+ * The read is one shot per location, so this only guards transient failures.
  */
-export const READOUT_MAX_ATTEMPTS = 3;
+export const READOUT_MAX_ATTEMPTS = 2;
 
 export const BASEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
 

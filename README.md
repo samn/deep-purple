@@ -14,13 +14,15 @@ centered on your location. All data is read directly in the browser from
    open the [NOAA HRRR forecast, 48 hour, virtual](https://dynamical.org/catalog/noaa-hrrr-forecast-48-hour-virtual/)
    icechunk repository straight from S3. Chunks are *virtual*: byte ranges
    into NOAA's original GRIB2 files on `noaa-hrrr-bdp-pds` (both buckets are
-   public + CORS-enabled).
+   public + CORS-enabled). That store is *map-optimized* — one whole grid per
+   (init, lead), which is what painting a frame wants; the point readout reads
+   its *time-optimized* sibling instead (see Data & attribution).
 2. A **pure-TypeScript GRIB2 decoder** (`src/lib/grib/decoder.ts`, registered
    as the store's `gribberish` zarr codec) decodes complex-packed messages
    (DRS templates 5.0/5.2/5.3) — no WASM, no COOP/COEP headers needed. Unit
    tests cross-validate it element-wise against the native
    [gribberish](https://github.com/mpiannucci/gribberish) library.
-3. A **Web Worker** owns the store, finds the latest complete forecast init
+3. A **Web Worker** owns both stores, finds the latest complete forecast init
    (1-byte manifest probes), and streams frames progressively (every 6 h
    first — playable after ~5 MB — then 3 h, then hourly; ~35 MB total).
    Fields are quantized to log-scale bytes (block-max downsampled 2× on
@@ -51,6 +53,7 @@ node --experimental-strip-types scripts/inspect-store.ts  # dump store hierarchy
 node scripts/screenshot.mjs                               # screenshot the running dev server
 npm run fetch-grib-fixtures                               # refresh unit-test GRIB messages (pinned date)
 npm run record-fixtures                                   # top up e2e HTTP fixtures (keeps recorded init time)
+npm run record-fixtures -- --prune                        # also drop bodies nothing requested any more
 npm run record-fixtures -- --fresh                        # re-record from scratch (new init: refresh snapshots)
 ```
 
@@ -71,8 +74,10 @@ npm run record-fixtures -- --fresh                        # re-record from scrat
   (and never invalidates the committed visual snapshots). `--fresh` re-records
   against the latest init and does require `npm run test:e2e:update`.
 - `tests/e2e/readout.spec.ts` asserts the temperature/dew-point values the
-  pinned fixtures hold at the leads listed in the manifest's `pointLeads`; if
-  you re-record with `--fresh`, update those expected values too.
+  pinned fixtures hold at the manifest's `point` location; if you re-record
+  with `--fresh`, update those expected values too. It also asserts the loading
+  priority — that the first progressive frame pass is fully requested before
+  the point store is touched.
 
 ## Deploy (Cloudflare)
 
@@ -105,10 +110,16 @@ hashed assets. No environment variables or server functions are required.
   always shows the most recent complete run.
 - With a location fix, the bottom bar reads out the forecast for that point
   beside the valid time: 2 m temperature (`temperature_2m`) and dew point
-  (`dew_point_temperature_2m`). Chunks are whole-grid, so a single cell still
-  costs one GRIB message per lead per variable — sampling is therefore lazy,
-  restricted to a coarse lead subset, and yields to frame loading (see
-  `READOUT_*` in `src/config.ts`).
+  (`dew_point_temperature_2m`), read from dynamical.org's **time-optimized**
+  [`noaa-hrrr-forecast-48-hour`](https://dynamical.org/catalog/noaa-hrrr-forecast-48-hour/)
+  store rather than the map's. Same forecast, rechunked: all 49 lead times sit
+  in one chunk (sharded over y/x), so a cell's whole 48-hour series is a single
+  ~3 MB read per variable — 6 requests / 6.4 MB at full hourly resolution,
+  where pulling the same series from the map-optimized store would be ~109
+  requests / ~120 MB of GRIB. It also needs no GRIB decode (float32 +
+  blosc/zstd, already in °C). The map's frames always load first — the readout
+  waits for the first progressive pass, since the overlay is what you're
+  looking at and both share the worker and the connection.
 - The °C/°F button (bottom right, above the attribution) switches the whole UI
   between metric and imperial: temperature/dew point in °C or °F and the rain
   legend in mm/hr or in/hr. Smoke stays µg/m³ — that concentration has no
