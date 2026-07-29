@@ -4,20 +4,47 @@ import { PointSeries } from "../../src/lib/pointSeries.ts";
 const HOURS = Array.from({ length: 49 }, (_, i) => i);
 
 describe("PointSeries.bracket", () => {
-  it("brackets a fractional time between adjacent leads", () => {
-    const ps = new PointSeries(HOURS);
-    expect(ps.bracket(9.4)).toEqual([9, 10]);
+  it("brackets a fractional time with stride-aligned leads only", () => {
+    // Every sampled lead costs a whole-grid GRIB message per variable, so the
+    // fetch target snaps to the coarse stride rather than the hourly grid.
+    const ps = new PointSeries(HOURS, 6);
+    expect(ps.bracket(9.4)).toEqual([6, 12]);
+    expect(ps.bracket(1)).toEqual([0, 6]);
   });
 
-  it("returns the same index when t lands on a lead", () => {
-    const ps = new PointSeries(HOURS);
+  it("returns the same index when t lands on a sampleable lead", () => {
+    const ps = new PointSeries(HOURS, 6);
     expect(ps.bracket(12)).toEqual([12, 12]);
+    expect(ps.bracket(30)).toEqual([30, 30]);
   });
 
   it("clamps at the edges of the range", () => {
-    const ps = new PointSeries(HOURS);
+    const ps = new PointSeries(HOURS, 6);
     expect(ps.bracket(-5)).toEqual([0, 0]);
     expect(ps.bracket(60)).toEqual([48, 48]);
+  });
+
+  it("limits the sampleable set to the stride plus the final lead", () => {
+    const ps = new PointSeries(HOURS, 6);
+    expect(ps.sampleable).toEqual([0, 6, 12, 18, 24, 30, 36, 42, 48]);
+    // A stride that doesn't divide the range still keeps the last lead, so the
+    // end of the timeline is never unsamplable.
+    const odd = new PointSeries(HOURS, 10);
+    expect(odd.sampleable).toEqual([0, 10, 20, 30, 40, 48]);
+    expect(odd.bracket(48)).toEqual([48, 48]);
+  });
+
+  it("caps how much a full playthrough can ever fetch", () => {
+    // The guard that keeps the readout from pulling ~118 MB: at most 9 leads
+    // are ever eligible across the whole 48 h timeline.
+    const ps = new PointSeries(HOURS, 6);
+    const touched = new Set<number>();
+    for (let t = 0; t <= 48; t += 0.05) {
+      const [a, b] = ps.bracket(t);
+      touched.add(a);
+      touched.add(b);
+    }
+    expect(touched.size).toBe(9);
   });
 });
 

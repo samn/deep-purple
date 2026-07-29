@@ -10,6 +10,7 @@
  * a slightly stale value that sharpens when the sample lands, instead of
  * blanking out on every move.
  */
+import { READOUT_LEAD_STRIDE_HOURS } from "../config.ts";
 
 export interface PointReading {
   /** 2 m air temperature, °C. */
@@ -21,9 +22,19 @@ export interface PointReading {
 export class PointSeries {
   private readonly cache = new Map<number, PointReading>();
   readonly leadHours: number[];
+  /** Lead indices eligible for sampling: stride-aligned, plus the last lead. */
+  readonly sampleable: number[];
 
-  constructor(leadHours: number[]) {
+  constructor(leadHours: number[], strideHours = READOUT_LEAD_STRIDE_HOURS) {
     this.leadHours = leadHours;
+    const stride = Math.max(1, strideHours);
+    const sampleable: number[] = [];
+    for (let i = 0; i < leadHours.length; i++) {
+      if (leadHours[i]! % stride === 0) sampleable.push(i);
+    }
+    const last = leadHours.length - 1;
+    if (last >= 0 && sampleable[sampleable.length - 1] !== last) sampleable.push(last);
+    this.sampleable = sampleable;
   }
 
   clear(): void {
@@ -39,23 +50,27 @@ export class PointSeries {
   }
 
   /**
-   * Lead indices on the full hourly grid bracketing time `t` (hours):
-   * `[below, above]`, where `hours[below] <= t <= hours[above]`. Both are
-   * equal when `t` lands on a lead or falls outside the range. This is the
-   * fetch target — the leads that would give an exact answer for `t`.
+   * Sampleable lead indices bracketing time `t` (hours): `[below, above]`,
+   * where both sides are drawn from the stride-aligned subset (see
+   * READOUT_LEAD_STRIDE_HOURS) rather than every hourly lead. This is the
+   * fetch target, so restricting it here is what bounds the readout's data
+   * cost. Both entries are equal when `t` lands on a sampleable lead or falls
+   * outside their span.
    */
   bracket(t: number): [below: number, above: number] {
+    const sampleable = this.sampleable;
+    if (sampleable.length === 0) return [0, 0];
     const hours = this.leadHours;
-    if (hours.length === 0) return [0, 0];
-    let below = 0;
-    for (let i = 0; i < hours.length; i++) {
+    let below = sampleable[0]!;
+    for (const i of sampleable) {
       if (hours[i]! <= t) below = i;
     }
-    let above = hours.length - 1;
-    for (let i = hours.length - 1; i >= 0; i--) {
+    let above = sampleable[sampleable.length - 1]!;
+    for (let k = sampleable.length - 1; k >= 0; k--) {
+      const i = sampleable[k]!;
       if (hours[i]! >= t) above = i;
     }
-    if (above < below) above = below;
+    if (hours[above]! < hours[below]!) above = below;
     return [below, above];
   }
 

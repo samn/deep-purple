@@ -6,9 +6,9 @@
  */
 import { LAYERS, LOAD_PASSES, POINT_VARIABLES, TEMPERATURE_VARIABLE, DEWPOINT_VARIABLE, type LayerConfig } from "../config.ts";
 import { makeLut, makeQuantizer, quantizeField, PRECIP_COLORMAP, SMOKE_COLORMAP, type Quantizer } from "../lib/colormap.ts";
-import { HRRR_GRID, makeGridTransform } from "../lib/lcc.ts";
+import { HRRR_GRID } from "../lib/lcc.ts";
 import { buildIndexMap, paintFrame, type IndexMap } from "../lib/reproject.ts";
-import { loadField, openArrays, openHrrrDataset, type HrrrDataset } from "../lib/store.ts";
+import { loadField, loadPoint, openArrays, openHrrrDataset, type HrrrDataset } from "../lib/store.ts";
 import type { MainToWorker, PaintRequest, SampleRequest, WorkerToMain } from "./protocol.ts";
 import { progressiveLeadOrder } from "./schedule.ts";
 
@@ -159,59 +159,75 @@ function handlePaint(req: PaintRequest): void {
   }
 }
 
-const gridTransform = makeGridTransform(HRRR_GRID);
-
 /**
- * Lazily open the point-readout arrays the first time a sample is requested.
- * Kept out of the initial store handshake so a store that lacks these
- * variables (or offline tests without fixtures for them) still loads the map.
- * Resolves to false if they can't be opened; sampling then no-ops.
+ * Open the point-readout arrays on first use. Kept out of the initial store
+ * handshake so a store that lacks these variables (or an offline test without
+ * fixtures for them) still loads the map. A failed attempt is *not* memoized —
+ * a transient network error must not disable the readout for the session.
  */
-let pointArraysReady: Promise<boolean> | null = null;
-function ensurePointArrays(ds: HrrrDataset): Promise<boolean> {
-  if (!pointArraysReady) {
-    pointArraysReady = openArrays(
-      ds,
-      POINT_VARIABLES.map((v) => ({ name: v.arrayName, scale: 1 })),
-    )
-      .then(() => true)
-      .catch((e) => {
-        console.warn("point-readout variables unavailable:", e instanceof Error ? e.message : e);
-        return false;
-      });
-  }
-  return pointArraysReady;
+let pointArrays: Promise<void> | null = null;
+function ensurePointArrays(ds: HrrrDataset): Promise<void> {
+  pointArrays ??= openArrays(
+    ds,
+    POINT_VARIABLES.map((v) => ({ name: v.arrayName, scale: 1 })),
+  ).catch((e: unknown) => {
+    pointArrays = null;
+    throw e;
+  });
+  return pointArrays;
 }
+
+/** Aborts the in-flight sample fetches of a superseded location. */
+let sampleAbort: { requestId: number; controller: AbortController } | null = null;
 
 /**
  * Sample temperature + dew point at one grid cell for the requested leads.
- * Each lead is an independent whole-grid chunk read; failures are per-lead
- * and non-fatal so the map keeps working.
+ * Every lead gets exactly one reply — `sample` or `sampleFailed` — so the main
+ * thread's in-flight bookkeeping can never wedge. Failures are per-lead and
+ * non-fatal: the map keeps working without the readout.
  */
 async function handleSample(req: SampleRequest): Promise<void> {
-  if (!dataset) return;
   const ds = dataset;
-  if (!(await ensurePointArrays(ds))) return;
+  const failAll = (retryable: boolean, message: string) => {
+    for (const leadIndex of req.leads) {
+      post({ type: "sampleFailed", requestId: req.requestId, leadIndex, retryable, message });
+    }
+  };
+  if (!ds) {
+    failAll(true, "store not opened");
+    return;
+  }
 
-  const [col, row] = gridTransform.lonLatToGrid(req.lon, req.lat);
-  const ci = Math.min(HRRR_GRID.nx - 1, Math.max(0, Math.round(col)));
-  const ri = Math.min(HRRR_GRID.ny - 1, Math.max(0, Math.round(row)));
+  // A new location supersedes the previous one: stop paying for its fetches.
+  if (!sampleAbort || sampleAbort.requestId !== req.requestId) {
+    sampleAbort?.controller.abort();
+    sampleAbort = { requestId: req.requestId, controller: new AbortController() };
+  }
+  const { signal } = sampleAbort.controller;
+
+  try {
+    await ensurePointArrays(ds);
+  } catch (e) {
+    failAll(true, `point variables unavailable: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
 
   await Promise.all(
     req.leads.map(async (leadIndex) => {
       try {
-        const [temp, dew] = await Promise.all([
-          loadField(ds, { name: TEMPERATURE_VARIABLE.arrayName, scale: 1 }, ds.latestInitIndex, leadIndex),
-          loadField(ds, { name: DEWPOINT_VARIABLE.arrayName, scale: 1 }, ds.latestInitIndex, leadIndex),
+        const [temperatureC, dewpointC] = await Promise.all([
+          loadPoint(ds, { name: TEMPERATURE_VARIABLE.arrayName, scale: 1 }, ds.latestInitIndex, leadIndex, req.col, req.row, signal),
+          loadPoint(ds, { name: DEWPOINT_VARIABLE.arrayName, scale: 1 }, ds.latestInitIndex, leadIndex, req.col, req.row, signal),
         ]);
-        const idx = ri * temp.nx + ci;
-        const temperatureC = temp.values[idx];
-        const dewpointC = dew.values[idx];
-        if (temperatureC === undefined || dewpointC === undefined) return;
-        if (Number.isNaN(temperatureC) || Number.isNaN(dewpointC)) return;
+        // A masked or missing cell will never become a number on retry.
+        if (!Number.isFinite(temperatureC) || !Number.isFinite(dewpointC)) {
+          post({ type: "sampleFailed", requestId: req.requestId, leadIndex, retryable: false, message: "no data at cell" });
+          return;
+        }
         post({ type: "sample", requestId: req.requestId, leadIndex, temperatureC, dewpointC });
       } catch (e) {
-        console.warn(`sample @${leadIndex} failed:`, e instanceof Error ? e.message : e);
+        const message = e instanceof Error ? e.message : String(e);
+        post({ type: "sampleFailed", requestId: req.requestId, leadIndex, retryable: !signal.aborted, message });
       }
     }),
   );

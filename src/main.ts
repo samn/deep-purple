@@ -1,10 +1,18 @@
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./style.css";
-import { BASEMAP_STYLE_URL, LAYERS, PRECIP_LAYER, SMOKE_LAYER, STORE_URL } from "./config.ts";
+import {
+  BASEMAP_STYLE_URL,
+  LAYERS,
+  PRECIP_LAYER,
+  READOUT_MAX_ATTEMPTS,
+  READOUT_MAX_INFLIGHT,
+  SMOKE_LAYER,
+  STORE_URL,
+} from "./config.ts";
 import { makeLut, PRECIP_COLORMAP, SMOKE_COLORMAP } from "./lib/colormap.ts";
 import { FrameStore } from "./lib/frames.ts";
-import { HRRR_GRID } from "./lib/lcc.ts";
+import { HRRR_GRID, makeGridTransform } from "./lib/lcc.ts";
 import { PointSeries } from "./lib/pointSeries.ts";
 import { Timeline } from "./lib/timeline.ts";
 import { GpuForecastLayer, gpuRendererSupported } from "./render/gpuLayer.ts";
@@ -96,11 +104,16 @@ worker.postMessage({
 let frameStore: FrameStore | null = null;
 let initTime: Date | null = null;
 let pointSeries: PointSeries | null = null;
-/** Located point being sampled, and a monotonic id so responses from a
- *  superseded location are ignored. */
-let sampleLoc: { lon: number; lat: number } | null = null;
+/**
+ * Grid cell being sampled for the readout, plus a monotonic id so replies for
+ * a superseded location are ignored (and its in-flight fetches aborted).
+ */
+let sampleCell: { col: number; row: number } | null = null;
 let sampleRequestId = 0;
+/** Leads awaiting a reply, leads given up on, and per-lead attempt counts. */
 const sampleInFlight = new Set<number>();
+const sampleUnavailable = new Set<number>();
+const sampleAttempts = new Map<number, number>();
 const forecastLayers = new Map<string, ForecastLayer>();
 // GPU layers exist from startup so frames arriving before the basemap loads
 // are kept; they attach to the map in maybeAddLayers().
@@ -221,36 +234,69 @@ function updateTimeUI(): void {
 
 /**
  * Update the top-right temperature/dew-point readout for the current time,
- * requesting any not-yet-loaded bracketing leads at the located point. No-ops
- * (and hides the box) until we have both a location and an open store.
+ * requesting the sampleable leads bracketing it. No-ops (and hides the box)
+ * until we have both a location and an open store.
+ *
+ * Sampling is deliberately stingy: only stride-aligned leads are eligible
+ * (READOUT_LEAD_STRIDE_HOURS) and at most READOUT_MAX_INFLIGHT requests run at
+ * once, because each lead costs a whole-grid GRIB message per variable and
+ * must not outbid the frame loader for bandwidth.
  */
 function refreshReadout(): void {
-  if (!pointSeries || !sampleLoc) {
+  const series = pointSeries;
+  if (!series || !sampleCell) {
     ui.setReadout(null);
     return;
   }
-  const [a, b] = pointSeries.bracket(timeline.t);
+  const [a, b] = series.bracket(timeline.t);
   const need = (a === b ? [a] : [a, b]).filter(
-    (li) => !pointSeries!.has(li) && !sampleInFlight.has(li),
+    (li) => !series.has(li) && !sampleInFlight.has(li) && !sampleUnavailable.has(li),
   );
-  if (need.length > 0) {
-    for (const li of need) sampleInFlight.add(li);
+  const budget = READOUT_MAX_INFLIGHT - sampleInFlight.size;
+  const take = need.slice(0, Math.max(0, budget));
+  if (take.length > 0) {
+    for (const li of take) sampleInFlight.add(li);
     worker.postMessage({
       type: "sample",
       requestId: sampleRequestId,
-      lon: sampleLoc.lon,
-      lat: sampleLoc.lat,
-      leads: need,
+      col: sampleCell.col,
+      row: sampleCell.row,
+      leads: take,
     } satisfies MainToWorker);
   }
-  ui.setReadout(pointSeries.reading(timeline.t));
+  ui.setReadout(series.reading(timeline.t));
 }
 
-/** Point the readout at a new location and start (re)sampling. */
+const gridTransform = makeGridTransform(HRRR_GRID);
+
+/**
+ * Point the readout at a location. Resolves lon/lat to a grid cell and drops
+ * points that fall outside the LCC grid — `inHrrrDomain` is a generous lon/lat
+ * box, so a fix near its corners (Bermuda, Baja) can sit off-grid, and
+ * clamping would silently report the weather hundreds of km away.
+ *
+ * Cached readings are kept when the fix resolves to the same cell: a repeat
+ * "locate" tap usually returns the same position, and re-sampling would cost
+ * megabytes per lead for identical values.
+ */
 function setSampleLocation(lon: number, lat: number): void {
-  sampleLoc = { lon, lat };
+  const [colF, rowF] = gridTransform.lonLatToGrid(lon, lat);
+  const col = Math.round(colF);
+  const row = Math.round(rowF);
+  if (col < 0 || col >= HRRR_GRID.nx || row < 0 || row >= HRRR_GRID.ny) {
+    sampleCell = null;
+    ui.setReadout(null);
+    return;
+  }
+  if (sampleCell && sampleCell.col === col && sampleCell.row === row) {
+    refreshReadout();
+    return;
+  }
+  sampleCell = { col, row };
   sampleRequestId++;
   sampleInFlight.clear();
+  sampleUnavailable.clear();
+  sampleAttempts.clear();
   pointSeries?.clear();
   refreshReadout();
 }
@@ -322,8 +368,30 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
       // Ignore samples for a superseded location.
       if (msg.requestId !== sampleRequestId || !pointSeries) break;
       sampleInFlight.delete(msg.leadIndex);
+      sampleAttempts.delete(msg.leadIndex);
       pointSeries.set(msg.leadIndex, { temperatureC: msg.temperatureC, dewpointC: msg.dewpointC });
       ui.setReadout(pointSeries.reading(timeline.t));
+      // A slot freed up; pick up any lead still needed for the current time.
+      refreshReadout();
+      break;
+    }
+    case "sampleFailed": {
+      if (msg.requestId !== sampleRequestId) break;
+      sampleInFlight.delete(msg.leadIndex);
+      // A retryable lead stays eligible so a transient error can self-heal —
+      // but only for a few attempts. refreshReadout runs on every timeline
+      // tick, so an endlessly retryable lead would be re-requested ~60x a
+      // second, each attempt costing a whole-grid chunk read per variable.
+      const attempts = (sampleAttempts.get(msg.leadIndex) ?? 0) + 1;
+      sampleAttempts.set(msg.leadIndex, attempts);
+      if (!msg.retryable || attempts >= READOUT_MAX_ATTEMPTS) {
+        sampleUnavailable.add(msg.leadIndex);
+      }
+      console.warn(`sample @${msg.leadIndex} unavailable (attempt ${attempts}): ${msg.message}`);
+      // Use the freed slot: retries the lead (up to the attempt cap) and picks
+      // up its sibling bracket, so a paused timeline still recovers instead of
+      // waiting for the next user interaction.
+      refreshReadout();
       break;
     }
     case "frameError": {

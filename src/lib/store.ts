@@ -132,6 +132,38 @@ export async function openArrays(
 }
 
 /**
+ * Read a single cell of one (init, lead) field. The store chunks whole grids,
+ * so this still transfers and decodes a full GRIB message — but unlike
+ * loadField it doesn't allocate a second full-grid Float32Array or scale ~1.9M
+ * values to reach one of them.
+ */
+export async function loadPoint(
+  dataset: HrrrDataset,
+  variable: VariableSpec,
+  initIndex: number,
+  leadIndex: number,
+  col: number,
+  row: number,
+  signal?: AbortSignal,
+): Promise<number> {
+  const arr = dataset.arrays.get(variable.name);
+  if (!arr) throw new Error(`Array not opened: ${variable.name}`);
+  const result = await zarr.get(
+    arr as zarr.Array<zarr.NumberDataType, IcechunkStore>,
+    [initIndex, leadIndex, null, null],
+    { opts: { signal } as never },
+  );
+  const src = result.data as Float64Array | Float32Array;
+  const [ny, nx] = result.shape as [number, number];
+  if (col < 0 || col >= nx || row < 0 || row >= ny) {
+    throw new Error(`Cell ${col},${row} outside ${nx}x${ny} grid`);
+  }
+  const value = src[row * nx + col];
+  if (value === undefined) throw new Error(`No value at cell ${col},${row}`);
+  return value * variable.scale;
+}
+
+/**
  * Read one (init, lead) field as Float32Array in north-up row-major order,
  * with display-unit scaling applied.
  */

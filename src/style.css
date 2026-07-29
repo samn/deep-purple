@@ -160,13 +160,6 @@ body {
   margin-top: 4px;
 }
 
-.top-right {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 10px;
-}
-
 .chip-row {
   display: flex;
   gap: 10px;
@@ -174,12 +167,25 @@ body {
 
 /* ---- located-point forecast readout ---- */
 
+/* Own full-width row, right-aligned: the top bar wraps on narrow screens and
+   a wrapped line packs its single item left under space-between, so relying on
+   the bar's own alignment would strand the box mid-left on phones. */
+.readout-slot {
+  flex: 0 0 100%;
+  display: flex;
+  justify-content: flex-end;
+  /* Only the box itself should intercept pointer events — the empty stretch of
+     this row must stay transparent to map drags. */
+  pointer-events: none;
+}
+
 .readout {
   display: flex;
   flex-direction: column;
   gap: 3px;
   padding: 7px 10px 6px;
   min-width: 96px;
+  pointer-events: auto;
 }
 
 .readout-hidden {

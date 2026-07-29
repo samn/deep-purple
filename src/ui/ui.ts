@@ -46,6 +46,7 @@ export class AppUI {
   private readonly progressBar: HTMLElement;
   private readonly progressWrap: HTMLElement;
   private readonly statusEl: HTMLElement;
+  private readonly readoutSlot: HTMLElement;
   private readonly readout: HTMLElement;
   private readonly readoutTemp: HTMLElement;
   private readonly readoutDew: HTMLElement;
@@ -65,8 +66,7 @@ export class AppUI {
     this.initLabel = el("div", "init-label", titleBox);
     this.initLabel.textContent = "Loading forecast…";
 
-    const topRight = el("div", "top-right", top);
-    const chipRow = el("div", "chip-row", topRight);
+    const chipRow = el("div", "chip-row", top);
     for (const { config, colormap, rangeText } of layers) {
       const chip = el("button", "chip chip-on", chipRow);
       chip.type = "button";
@@ -85,10 +85,25 @@ export class AppUI {
       this.chips.set(config.id, chip);
     }
 
+    // Full-width row of its own, so the readout stays hard against the right
+    // edge on every viewport. The top bar wraps on narrow screens, and a
+    // wrapped line packs its single item to the LEFT under space-between —
+    // which is how the box ended up mid-left on phones. The slot is hidden
+    // alongside the box so it contributes no layout (and swallows no map
+    // gestures) while there is nothing to show.
+    this.readoutSlot = el("div", "readout-slot readout-hidden", top);
+
     // Forecast readout for the located point; hidden until we have a fix and
     // a value for the current time.
-    this.readout = el("div", "readout readout-hidden", topRight);
-    this.readout.setAttribute("aria-live", "polite");
+    //
+    // Deliberately NOT an aria-live region: the values change with the
+    // timeline, so during playback a live region would queue an announcement
+    // several times a second and drown out everything else. role="group" gives
+    // the box a name assistive tech will actually use (ARIA forbids naming a
+    // plain div, whose implicit role is `generic`) and leaves reading it to the
+    // user.
+    this.readout = el("div", "readout", this.readoutSlot);
+    this.readout.setAttribute("role", "group");
     this.readout.setAttribute("aria-label", "Forecast at your location");
     const tempRow = el("div", "readout-row", this.readout);
     el("span", "readout-label", tempRow).textContent = "Temp";
@@ -173,15 +188,22 @@ export class AppUI {
     this.playBtn.setAttribute("aria-label", playing ? "Pause animation" : "Play animation");
   }
 
-  /** Show the located-point forecast readout, or hide it when null. */
+  /**
+   * Show the located-point forecast readout, or hide it when null. Called on
+   * every timeline change, so the formatted strings are diffed and the DOM is
+   * only touched when a displayed value actually changes.
+   */
   setReadout(reading: { temperatureC: number; dewpointC: number } | null): void {
     if (!reading) {
-      this.readout.classList.add("readout-hidden");
+      this.readoutSlot.classList.add("readout-hidden");
       return;
     }
-    this.readoutTemp.textContent = `${Math.round(reading.temperatureC)}°C`;
-    this.readoutDew.textContent = `${Math.round(reading.dewpointC)}°C`;
-    this.readout.classList.remove("readout-hidden");
+    // `|| 0` normalizes -0 (Math.round(-0.2)) so it renders as "0°C", not "-0°C".
+    const temp = `${Math.round(reading.temperatureC) || 0}°C`;
+    const dew = `${Math.round(reading.dewpointC) || 0}°C`;
+    if (this.readoutTemp.textContent !== temp) this.readoutTemp.textContent = temp;
+    if (this.readoutDew.textContent !== dew) this.readoutDew.textContent = dew;
+    this.readoutSlot.classList.remove("readout-hidden");
   }
 
   setProgress(loaded: number, total: number): void {

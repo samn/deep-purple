@@ -35,16 +35,19 @@ export interface PaintRequest {
 }
 
 /**
- * Sample temperature + dew point at a location for the given lead indices.
- * Chunks are whole-grid, so there's one chunk fetch per lead regardless of
- * how few cells we read. `requestId` lets stale responses (after the location
- * changed) be discarded on the main thread.
+ * Sample temperature + dew point at one grid cell for the given lead indices.
+ * Chunks are whole-grid, so there's one chunk fetch per lead per variable
+ * regardless of how few cells we read. The caller resolves lon/lat to an
+ * in-range cell (so out-of-grid points are rejected before any fetch) and
+ * bumps `requestId` when the location changes, which both discards stale
+ * replies and aborts the superseded fetches.
  */
 export interface SampleRequest {
   type: "sample";
   requestId: number;
-  lon: number;
-  lat: number;
+  /** Grid column (0..nx-1) and row (0..ny-1), north-up row order. */
+  col: number;
+  row: number;
   leads: number[];
 }
 
@@ -110,6 +113,21 @@ export interface SampleResultMessage {
   dewpointC: number;
 }
 
+/**
+ * A requested sample could not be produced. Sent for every failed lead —
+ * including aborted, missing-array and non-finite-value cases — so the main
+ * thread can drop its in-flight marker and retry the lead later instead of
+ * wedging it forever. `retryable` is false when re-requesting is pointless
+ * (e.g. the cell has no data at all).
+ */
+export interface SampleFailedMessage {
+  type: "sampleFailed";
+  requestId: number;
+  leadIndex: number;
+  retryable: boolean;
+  message: string;
+}
+
 export type WorkerToMain =
   | OpenedMessage
   | FrameLoadedMessage
@@ -117,4 +135,5 @@ export type WorkerToMain =
   | ProgressMessage
   | FrameErrorMessage
   | SampleResultMessage
+  | SampleFailedMessage
   | FatalErrorMessage;
