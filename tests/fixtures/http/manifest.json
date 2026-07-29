@@ -1,5 +1,5 @@
 {
- "recordedAt": "2026-07-17T01:15:50.941Z",
+ "recordedAt": "2026-07-29T01:53:56.160Z",
  "initTimeMs": 1784224800000,
  "initTimeIso": "2026-07-16T18:00:00.000Z",
  "latestInitIndex": 11701,
@@ -13,6 +13,10 @@
   36,
   42,
   48
+ ],
+ "pointLeads": [
+  0,
+  30
  ],
  "entries": [
   {
@@ -195,6 +199,48 @@
    "range": "bytes=63372834-63453430",
    "status": 206,
    "file": "c62a508a1057bd4c6c43.bin",
+   "contentType": "binary/octet-stream"
+  },
+  {
+   "url": "https://dynamical-noaa-hrrr.s3.amazonaws.com/noaa-hrrr-forecast-48-hour-virtual/v0.5.0.icechunk/manifests/J5SGTM8W8TRS6WM25ZNG",
+   "range": "",
+   "status": 200,
+   "file": "965d364df7d36f00366a.bin",
+   "contentType": "application/octet-stream"
+  },
+  {
+   "url": "https://noaa-hrrr-bdp-pds.s3.us-east-1.amazonaws.com/hrrr.20260716/conus/hrrr.t18z.wrfsfcf00.grib2",
+   "range": "bytes=35646802-36925944",
+   "status": 206,
+   "file": "9ea4d83cdc8e140eb060.bin",
+   "contentType": "binary/octet-stream"
+  },
+  {
+   "url": "https://noaa-hrrr-bdp-pds.s3.us-east-1.amazonaws.com/hrrr.20260716/conus/hrrr.t18z.wrfsfcf30.grib2",
+   "range": "bytes=48398294-49702343",
+   "status": 206,
+   "file": "0bb8b7164d62253ef10b.bin",
+   "contentType": "binary/octet-stream"
+  },
+  {
+   "url": "https://dynamical-noaa-hrrr.s3.amazonaws.com/noaa-hrrr-forecast-48-hour-virtual/v0.5.0.icechunk/manifests/M2JP4GYB1MW45S37AYB0",
+   "range": "",
+   "status": 200,
+   "file": "efe8c9c20b31ed7aa785.bin",
+   "contentType": "application/octet-stream"
+  },
+  {
+   "url": "https://noaa-hrrr-bdp-pds.s3.us-east-1.amazonaws.com/hrrr.20260716/conus/hrrr.t18z.wrfsfcf00.grib2",
+   "range": "bytes=39866254-41097441",
+   "status": 206,
+   "file": "e238ab3b46c74c783778.bin",
+   "contentType": "binary/octet-stream"
+  },
+  {
+   "url": "https://noaa-hrrr-bdp-pds.s3.us-east-1.amazonaws.com/hrrr.20260716/conus/hrrr.t18z.wrfsfcf30.grib2",
+   "range": "bytes=52734313-54039844",
+   "status": 206,
+   "file": "2f373d90d25c7197c2d4.bin",
    "contentType": "binary/octet-stream"
   }
  ]

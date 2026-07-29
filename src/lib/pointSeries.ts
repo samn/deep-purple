@@ -1,8 +1,14 @@
 /**
  * Cache of single-cell temperature + dew point readings at one location,
- * keyed by lead index, with bracketing and linear interpolation over the
- * fixed lead-hour grid so the readout can track a fractional timeline
- * position while values are still streaming in.
+ * keyed by lead index.
+ *
+ * Samples are fetched on demand (one whole-grid chunk per lead per variable),
+ * so the cache is always sparse. Display and fetching therefore use different
+ * lookups, mirroring how FrameStore handles progressively loading frames:
+ * `bracket` names the exact leads worth fetching for a time, while `reading`
+ * interpolates between the nearest leads actually cached — so scrubbing shows
+ * a slightly stale value that sharpens when the sample lands, instead of
+ * blanking out on every move.
  */
 
 export interface PointReading {
@@ -33,9 +39,10 @@ export class PointSeries {
   }
 
   /**
-   * Lead indices bracketing time `t` (hours): `[below, above]`, where
-   * `hours[below] <= t <= hours[above]`. Both equal `t` lands on a lead or
-   * falls outside the range.
+   * Lead indices on the full hourly grid bracketing time `t` (hours):
+   * `[below, above]`, where `hours[below] <= t <= hours[above]`. Both are
+   * equal when `t` lands on a lead or falls outside the range. This is the
+   * fetch target — the leads that would give an exact answer for `t`.
    */
   bracket(t: number): [below: number, above: number] {
     const hours = this.leadHours;
@@ -53,20 +60,29 @@ export class PointSeries {
   }
 
   /**
-   * Interpolated reading at time `t`. Uses both bracketing leads when cached,
-   * otherwise whichever side is available, and null when neither is yet loaded.
+   * Interpolated reading at time `t` from the nearest cached leads on either
+   * side, or the single nearest cached lead when `t` is outside their span.
+   * Null only while nothing at all is cached.
    */
   reading(t: number): PointReading | null {
-    const [a, b] = this.bracket(t);
-    const ra = this.cache.get(a) ?? null;
-    const rb = this.cache.get(b) ?? null;
-    if (!ra && !rb) return null;
-    if (a === b || !ra || !rb) {
-      const r = ra ?? rb!;
+    const hours = this.leadHours;
+    let below = -1;
+    let above = -1;
+    for (const leadIndex of this.cache.keys()) {
+      const h = hours[leadIndex];
+      if (h === undefined) continue;
+      if (h <= t && (below === -1 || h > hours[below]!)) below = leadIndex;
+      if (h >= t && (above === -1 || h < hours[above]!)) above = leadIndex;
+    }
+    if (below === -1 && above === -1) return null;
+    if (below === -1 || above === -1 || below === above) {
+      const r = this.cache.get(below === -1 ? above : below)!;
       return { temperatureC: r.temperatureC, dewpointC: r.dewpointC };
     }
-    const ha = this.leadHours[a]!;
-    const hb = this.leadHours[b]!;
+    const ra = this.cache.get(below)!;
+    const rb = this.cache.get(above)!;
+    const ha = hours[below]!;
+    const hb = hours[above]!;
     const f = hb > ha ? Math.max(0, Math.min(1, (t - ha) / (hb - ha))) : 0;
     return {
       temperatureC: ra.temperatureC + (rb.temperatureC - ra.temperatureC) * f,

@@ -50,7 +50,8 @@ node --experimental-strip-types scripts/spike-read.ts     # end-to-end store rea
 node --experimental-strip-types scripts/inspect-store.ts  # dump store hierarchy/metadata
 node scripts/screenshot.mjs                               # screenshot the running dev server
 npm run fetch-grib-fixtures                               # refresh unit-test GRIB messages (pinned date)
-npm run record-fixtures                                   # re-record e2e HTTP fixtures (updates init time)
+npm run record-fixtures                                   # top up e2e HTTP fixtures (keeps recorded init time)
+npm run record-fixtures -- --fresh                        # re-record from scratch (new init: refresh snapshots)
 ```
 
 ### Testing notes
@@ -65,6 +66,13 @@ npm run record-fixtures                                   # re-record e2e HTTP f
   rendering intentionally, refresh with `npm run test:e2e:update`.
 - CI runs in the `mcr.microsoft.com/playwright` image matching the pinned
   `@playwright/test` version so snapshots render identically.
+- Fixture recording is **incremental**: bodies already in the manifest are
+  replayed from disk, so adding coverage never moves the recorded init time
+  (and never invalidates the committed visual snapshots). `--fresh` re-records
+  against the latest init and does require `npm run test:e2e:update`.
+- `tests/e2e/readout.spec.ts` asserts the temperature/dew-point values the
+  pinned fixtures hold at the leads listed in the manifest's `pointLeads`; if
+  you re-record with `--fresh`, update those expected values too.
 
 ## Deploy (Cloudflare)
 
@@ -95,3 +103,9 @@ hashed assets. No environment variables or server functions are required.
   AGL); rain is instantaneous precipitation rate (`precipitation_rate_surface`,
   mm/hr). New forecasts are published every 6 hours (00/06/12/18 UTC); the app
   always shows the most recent complete run.
+- With a location fix, a top-right box reads out the forecast for that point:
+  2 m temperature (`temperature_2m`) and dew point
+  (`dew_point_temperature_2m`), both °C. Chunks are whole-grid, so a single
+  cell still costs one GRIB message per lead per variable — sampling is
+  therefore lazy, restricted to a coarse lead subset, and yields to frame
+  loading (see `READOUT_*` in `src/config.ts`).

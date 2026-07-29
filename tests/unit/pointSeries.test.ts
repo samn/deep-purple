@@ -43,6 +43,28 @@ describe("PointSeries.reading", () => {
     expect(ps.reading(9.5)).toEqual({ temperatureC: 20, dewpointC: 10 });
   });
 
+  it("interpolates between the nearest cached leads, not just adjacent ones", () => {
+    // Sparse cache, as the on-demand sampler produces: t=15 sits between the
+    // two cached leads even though neither is its hourly neighbour.
+    const ps = new PointSeries(HOURS);
+    ps.set(0, { temperatureC: 10, dewpointC: 0 });
+    ps.set(30, { temperatureC: 40, dewpointC: 30 });
+    const r = ps.reading(15)!;
+    expect(r.temperatureC).toBeCloseTo(25);
+    expect(r.dewpointC).toBeCloseTo(15);
+  });
+
+  it("holds the nearest cached value rather than blanking while a sample loads", () => {
+    // Scrubbing from 0 to 30 with only lead 0 cached must keep showing a
+    // value (slightly stale) instead of hiding the readout.
+    const ps = new PointSeries(HOURS);
+    ps.set(0, { temperatureC: 31, dewpointC: 10 });
+    expect(ps.reading(30)).toEqual({ temperatureC: 31, dewpointC: 10 });
+    // Once the lead-30 sample lands it takes over exactly.
+    ps.set(30, { temperatureC: 33, dewpointC: 4 });
+    expect(ps.reading(30)).toEqual({ temperatureC: 33, dewpointC: 4 });
+  });
+
   it("returns the exact value when t lands on a loaded lead", () => {
     const ps = new PointSeries(HOURS);
     ps.set(12, { temperatureC: 31.6, dewpointC: 12.2 });
