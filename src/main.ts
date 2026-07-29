@@ -54,8 +54,8 @@ const enabled = new Map<string, boolean>(LAYERS.map((l) => [l.id, true]));
 const ui = new AppUI(
   overlayRoot,
   [
-    { config: SMOKE_LAYER, colormap: SMOKE_COLORMAP, rangeText: "2–500 µg/m³" },
-    { config: PRECIP_LAYER, colormap: PRECIP_COLORMAP, rangeText: "0.1–100 mm/hr" },
+    { config: SMOKE_LAYER, colormap: SMOKE_COLORMAP },
+    { config: PRECIP_LAYER, colormap: PRECIP_COLORMAP },
   ],
   {
     onScrub: (t) => timeline.scrubTo(t),

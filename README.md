@@ -103,9 +103,16 @@ hashed assets. No environment variables or server functions are required.
   AGL); rain is instantaneous precipitation rate (`precipitation_rate_surface`,
   mm/hr). New forecasts are published every 6 hours (00/06/12/18 UTC); the app
   always shows the most recent complete run.
-- With a location fix, a top-right box reads out the forecast for that point:
-  2 m temperature (`temperature_2m`) and dew point
-  (`dew_point_temperature_2m`), both °C. Chunks are whole-grid, so a single
-  cell still costs one GRIB message per lead per variable — sampling is
-  therefore lazy, restricted to a coarse lead subset, and yields to frame
-  loading (see `READOUT_*` in `src/config.ts`).
+- With a location fix, the bottom bar reads out the forecast for that point
+  beside the valid time: 2 m temperature (`temperature_2m`) and dew point
+  (`dew_point_temperature_2m`). Chunks are whole-grid, so a single cell still
+  costs one GRIB message per lead per variable — sampling is therefore lazy,
+  restricted to a coarse lead subset, and yields to frame loading (see
+  `READOUT_*` in `src/config.ts`).
+- The °C/°F button (bottom right, above the attribution) switches the whole UI
+  between metric and imperial: temperature/dew point in °C or °F and the rain
+  legend in mm/hr or in/hr. Smoke stays µg/m³ — that concentration has no
+  imperial counterpart in common use (US AQI reporting uses it too). Only
+  display strings convert; the store, decoder and colormap thresholds are
+  metric throughout (`src/lib/units.ts`). The choice persists in
+  `localStorage`, defaulting to metric.

@@ -14,8 +14,9 @@ const AT_FIRST = { temp: "31°C", dew: "10°C" };
 const AT_SCRUB = { temp: "33°C", dew: "4°C" };
 
 const readout = ".readout";
-const tempValue = ".readout-row:nth-child(1) .readout-value";
-const dewValue = ".readout-row:nth-child(2) .readout-value";
+const tempValue = '.readout-metric[data-metric="temp"] .readout-value';
+const dewValue = '.readout-metric[data-metric="dew"] .readout-value';
+const unitBtn = ".unit-btn";
 
 test.beforeEach(() => {
   // Guards the constants above against a fixture re-record that changes leads.
@@ -51,19 +52,24 @@ test.describe("forecast readout with a location", () => {
     await expect(page.locator(readout)).not.toHaveAttribute("aria-live", /.*/);
   });
 
-  test("sits against the top-right edge on any viewport", async ({ page }) => {
+  test("sits in the bottom bar, to the right of the time", async ({ page }) => {
     const box = (await page.locator(readout).boundingBox())!;
+    const time = (await page.locator(".time-labels").boundingBox())!;
+    const bar = (await page.locator(".bottom-bar").boundingBox())!;
+
+    // Immediately right of the time labels, sharing their line.
+    expect(box.x).toBeGreaterThanOrEqual(time.x + time.width);
+    expect(box.x).toBeLessThan(time.x + time.width + 40);
+    // Inside the bottom bar, not floating over the map.
+    expect(box.y).toBeGreaterThanOrEqual(bar.y);
+    expect(box.y + box.height).toBeLessThanOrEqual(bar.y + bar.height);
+    // Fits without pushing past the bar's padding, even at phone width.
     const viewport = page.viewportSize()!;
-    // Flush right: its right edge is within the bar's own padding of the
-    // viewport edge. Checked this way rather than "x > width/2" because the top
-    // bar wraps on phones, where a half-width test says nothing about alignment.
-    const rightGap = viewport.width - (box.x + box.width);
-    expect(rightGap).toBeGreaterThanOrEqual(0);
-    expect(rightGap).toBeLessThanOrEqual(24);
-    // Top area, and clear of the chips it sits beneath.
-    expect(box.y).toBeLessThan(viewport.height / 3);
-    const chips = (await page.locator(".chip-row").boundingBox())!;
-    expect(box.y).toBeGreaterThanOrEqual(chips.y + chips.height);
+    expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+    // The map controls are offset from the bottom by a fixed amount, so a
+    // readout that wrapped to its own line would grow the bar underneath them.
+    const info = (await page.locator(".maplibregl-ctrl-attrib-button").boundingBox())!;
+    expect(info.y + info.height).toBeLessThanOrEqual(bar.y);
   });
 
   test("updates when the timeline is scrubbed", async ({ page }) => {
@@ -92,6 +98,70 @@ test.describe("forecast readout with a location", () => {
       await page.waitForTimeout(250);
     }
     await expect(page.locator(".rel-label")).not.toHaveText("+0h");
+  });
+});
+
+test.describe("unit toggle", () => {
+  test.use({ geolocation: DENVER, permissions: ["geolocation"] });
+
+  test.beforeEach(async ({ context, page }) => {
+    await routeFixtures(context);
+    await gotoApp(page);
+    await waitForLoaded(page);
+  });
+
+  test("switches the readout between Celsius and Fahrenheit", async ({ page }) => {
+    await expect(page.locator(tempValue)).toHaveText("31°C");
+    await expect(page.locator(dewValue)).toHaveText("10°C");
+
+    await page.locator(unitBtn).click();
+
+    // 31.33°C -> 88°F, 9.77°C -> 50°F.
+    await expect(page.locator(tempValue)).toHaveText("88°F");
+    await expect(page.locator(dewValue)).toHaveText("50°F");
+
+    await page.locator(unitBtn).click();
+    await expect(page.locator(tempValue)).toHaveText("31°C");
+  });
+
+  test("relabels the legend ranges too, and leaves µg/m³ alone", async ({ page }) => {
+    const rain = page.locator('.chip[data-layer="precip"] .chip-range');
+    const smoke = page.locator('.chip[data-layer="smoke"] .chip-range');
+    await expect(rain).toHaveText("0.1–100 mm/hr");
+    await expect(smoke).toHaveText("2–500 µg/m³");
+
+    await page.locator(unitBtn).click();
+
+    await expect(rain).toHaveText("0.004–3.9 in/hr");
+    // Smoke concentration has no imperial counterpart in common use.
+    await expect(smoke).toHaveText("2–500 µg/m³");
+  });
+
+  test("reports its state and sits above the attribution button", async ({ page }) => {
+    await expect(page.locator(unitBtn)).toHaveAttribute("aria-pressed", "false");
+    await expect(page.locator(unitBtn)).toHaveAttribute("aria-label", /imperial/i);
+    await page.locator(unitBtn).click();
+    await expect(page.locator(unitBtn)).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator(unitBtn)).toHaveAttribute("aria-label", /metric/i);
+
+    const btn = (await page.locator(unitBtn).boundingBox())!;
+    const info = (await page.locator(".maplibregl-ctrl-attrib-button").boundingBox())!;
+    const locate = (await page.locator(".locate-btn").boundingBox())!;
+    // Directly above the ⓘ button, and below the locate button.
+    expect(btn.y + btn.height).toBeLessThanOrEqual(info.y);
+    expect(btn.y).toBeGreaterThanOrEqual(locate.y + locate.height);
+    // Same right-hand column.
+    expect(Math.abs(btn.x - locate.x)).toBeLessThan(2);
+  });
+
+  test("remembers the choice across a reload", async ({ page }) => {
+    await page.locator(unitBtn).click();
+    await expect(page.locator(tempValue)).toHaveText("88°F");
+
+    await gotoApp(page);
+    await waitForLoaded(page);
+    await expect(page.locator(unitBtn)).toHaveText("°F");
+    await expect(page.locator(tempValue)).toHaveText("88°F");
   });
 });
 

@@ -95,7 +95,7 @@ body {
 .title-box,
 .chip,
 .locate-btn,
-.readout,
+.unit-btn,
 .status {
   position: relative;
   border: 1px solid var(--border);
@@ -107,7 +107,7 @@ body {
 .title-box::after,
 .chip::after,
 .locate-btn::after,
-.readout::after,
+.unit-btn::after,
 .status::after {
   content: "";
   position: absolute;
@@ -163,55 +163,6 @@ body {
 .chip-row {
   display: flex;
   gap: 10px;
-}
-
-/* ---- located-point forecast readout ---- */
-
-/* Own full-width row, right-aligned: the top bar wraps on narrow screens and
-   a wrapped line packs its single item left under space-between, so relying on
-   the bar's own alignment would strand the box mid-left on phones. */
-.readout-slot {
-  flex: 0 0 100%;
-  display: flex;
-  justify-content: flex-end;
-  /* Only the box itself should intercept pointer events — the empty stretch of
-     this row must stay transparent to map drags. */
-  pointer-events: none;
-}
-
-.readout {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 7px 10px 6px;
-  min-width: 96px;
-  pointer-events: auto;
-}
-
-.readout-hidden {
-  display: none;
-}
-
-.readout-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.readout-label {
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-}
-
-.readout-value {
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
 }
 
 .chip {
@@ -274,6 +225,7 @@ body {
 /* ---- buttons: square, bordered, invert on press ---- */
 
 .locate-btn,
+.unit-btn,
 .play-btn {
   display: flex;
   align-items: center;
@@ -285,19 +237,38 @@ body {
 }
 
 .locate-btn:active,
+.unit-btn:active,
 .play-btn:active {
   background: var(--fg);
   color: var(--bg);
 }
 
-.locate-btn {
+/* Bottom-right control stack, sitting just above the attribution button so the
+   unit toggle is the control directly above it. */
+.map-controls {
   position: absolute;
   right: calc(12px + var(--safe-right));
-  bottom: calc(200px + var(--safe-bottom));
+  bottom: calc(186px + var(--safe-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.locate-btn,
+.unit-btn {
   width: 44px;
   height: 44px;
-  font-size: 20px;
   line-height: 1;
+}
+
+.locate-btn {
+  font-size: 20px;
+}
+
+.unit-btn {
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---- bottom bar: full-bleed flat panel with a hard top rule ---- */
@@ -316,6 +287,7 @@ body {
 
 .time-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   margin-bottom: 2px;
@@ -337,6 +309,8 @@ body {
   display: flex;
   align-items: baseline;
   gap: 10px;
+  /* Never squeezed: only the readout after it wraps when space runs out. */
+  flex: none;
 }
 
 .time-label {
@@ -351,6 +325,44 @@ body {
   font-weight: 500;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---- located-point forecast readout (in the time row) ---- */
+
+/* Sits immediately right of the time labels, reading as part of the same
+   "what the map shows right now" group. Allowed to wrap to its own line rather
+   than squeeze the time when the bar gets narrow. */
+.readout {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-left: 4px;
+}
+
+.readout-metric {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.readout-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.readout-value {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.readout-hidden {
+  display: none;
 }
 
 /* ---- scrubber: thin black rule, rectangular handle ---- */

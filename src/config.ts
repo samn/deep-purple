@@ -1,4 +1,5 @@
 /** Application configuration: data store, variables, rendering. */
+import type { Quantity } from "./lib/units.ts";
 
 export const STORE_URL =
   "https://dynamical-noaa-hrrr.s3.amazonaws.com/noaa-hrrr-forecast-48-hour-virtual/v0.5.0.icechunk";
@@ -8,9 +9,12 @@ export interface LayerConfig {
   label: string;
   /** Zarr array name. */
   arrayName: string;
-  /** Multiply raw store values by this to get display units. */
+  /** Multiply raw store values by this to get metric display units. */
   scale: number;
-  units: string;
+  /** Physical quantity, so the legend can be relabelled per unit system. */
+  quantity: Quantity;
+  /** Legend bounds in metric units (matches the colormap's end stops). */
+  range: [number, number];
 }
 
 /** Precipitation rate: kg m-2 s-1 → mm/hr. */
@@ -19,7 +23,8 @@ export const PRECIP_LAYER: LayerConfig = {
   label: "Rain",
   arrayName: "precipitation_rate_surface",
   scale: 3600,
-  units: "mm/hr",
+  quantity: "rate",
+  range: [0.1, 100],
 };
 
 /** Near-surface smoke: kg m-3 → µg/m³. */
@@ -28,7 +33,8 @@ export const SMOKE_LAYER: LayerConfig = {
   label: "Smoke",
   arrayName: "mass_density_8m",
   scale: 1e9,
-  units: "µg/m³",
+  quantity: "density",
+  range: [2, 500],
 };
 
 export const LAYERS: LayerConfig[] = [SMOKE_LAYER, PRECIP_LAYER];
@@ -43,21 +49,21 @@ export interface PointVariable {
   label: string;
   /** Zarr array name. */
   arrayName: string;
-  units: string;
+  quantity: Quantity;
 }
 
 export const TEMPERATURE_VARIABLE: PointVariable = {
   id: "temperature",
   label: "Temp",
   arrayName: "temperature_2m",
-  units: "°C",
+  quantity: "temperature",
 };
 
 export const DEWPOINT_VARIABLE: PointVariable = {
   id: "dewpoint",
-  label: "Dew pt",
+  label: "Dew",
   arrayName: "dew_point_temperature_2m",
-  units: "°C",
+  quantity: "temperature",
 };
 
 export const POINT_VARIABLES: PointVariable[] = [TEMPERATURE_VARIABLE, DEWPOINT_VARIABLE];
