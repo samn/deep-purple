@@ -6,6 +6,7 @@ import {
   LAYERS,
   PRECIP_LAYER,
   READOUT_MAX_ATTEMPTS,
+  READOUT_RETRY_DELAY_MS,
   SMOKE_LAYER,
   STORE_URL,
 } from "./config.ts";
@@ -109,7 +110,7 @@ let pointSeries: PointSeries | null = null;
  */
 let sampleCell: { col: number; row: number } | null = null;
 let sampleRequestId = 0;
-type SampleState = "idle" | "loading" | "loaded" | "failed";
+type SampleState = "idle" | "loading" | "loaded" | "failed" | "gaveUp";
 let sampleState: SampleState = "idle";
 let sampleAttempts = 0;
 /**
@@ -244,8 +245,7 @@ function updateTimeUI(): void {
  */
 function requestSeriesIfNeeded(): void {
   if (!sampleCell || initTime === null || !firstPassDone) return;
-  if (sampleState === "loading" || sampleState === "loaded") return;
-  if (sampleState === "failed" && sampleAttempts >= READOUT_MAX_ATTEMPTS) return;
+  if (sampleState === "loading" || sampleState === "loaded" || sampleState === "gaveUp") return;
   sampleState = "loading";
   sampleAttempts++;
   worker.postMessage({
@@ -257,10 +257,18 @@ function requestSeriesIfNeeded(): void {
   } satisfies MainToWorker);
 }
 
-/** Repaint the readout for the current time, hiding it when there is no data. */
+/**
+ * Repaint the readout for the current time. Shows a loading placeholder from
+ * the moment there is a location — including while the read is queued behind
+ * the map's first frame pass — so the row reserves its space and the user can
+ * see the values are coming.
+ */
 function refreshReadout(): void {
   requestSeriesIfNeeded();
-  ui.setReadout(sampleCell && pointSeries ? pointSeries.reading(timeline.t) : null);
+  const reading = sampleCell && pointSeries ? pointSeries.reading(timeline.t) : null;
+  if (reading) ui.setReadout({ kind: "value", ...reading });
+  else if (sampleCell && sampleState !== "gaveUp") ui.setReadout({ kind: "loading" });
+  else ui.setReadout({ kind: "hidden" });
 }
 
 const gridTransform = makeGridTransform(HRRR_GRID);
@@ -280,11 +288,25 @@ function setSampleLocation(lon: number, lat: number): void {
   const col = Math.round(colF);
   const row = Math.round(rowF);
   if (col < 0 || col >= HRRR_GRID.nx || row < 0 || row >= HRRR_GRID.ny) {
+    // Bump the id too: a reply still in flight for the previous cell must not
+    // land in the readout after we have decided this location has no data.
     sampleCell = null;
-    ui.setReadout(null);
+    sampleRequestId++;
+    sampleState = "idle";
+    sampleAttempts = 0;
+    pointSeries?.clear();
+    ui.setReadout({ kind: "hidden" });
     return;
   }
   if (sampleCell && sampleCell.col === col && sampleCell.row === row) {
+    // Same cell: keep the series we already paid for. A fresh fix is also the
+    // natural moment to retry a read we had given up on — otherwise tapping
+    // locate can never bring the readout back, since geolocation returns the
+    // same cached position and nothing else resets the state.
+    if (sampleState === "gaveUp" || sampleState === "failed") {
+      sampleState = "idle";
+      sampleAttempts = 0;
+    }
     refreshReadout();
     return;
   }
@@ -371,16 +393,22 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
       if (msg.requestId !== sampleRequestId || !pointSeries) break;
       sampleState = "loaded";
       pointSeries.setSeries(msg.leadHours, msg.temperatureC, msg.dewpointC);
-      ui.setReadout(pointSeries.reading(timeline.t));
+      refreshReadout();
       break;
     }
     case "sampleFailed": {
       if (msg.requestId !== sampleRequestId) break;
       // Retryable failures get another go on the next timeline move, bounded by
-      // READOUT_MAX_ATTEMPTS; otherwise the readout simply stays hidden.
-      sampleState = msg.retryable ? "failed" : "loaded";
-      if (!msg.retryable) sampleAttempts = READOUT_MAX_ATTEMPTS;
+      // READOUT_MAX_ATTEMPTS; past that (or when a retry cannot help) the
+      // placeholder is dropped rather than left spinning forever.
+      const spent = !msg.retryable || sampleAttempts >= READOUT_MAX_ATTEMPTS;
+      sampleState = spent ? "gaveUp" : "failed";
       console.warn(`point readout unavailable: ${msg.message}`);
+      // Back off before retrying. refreshReadout runs on every timeline tick,
+      // so retrying from there would spend the whole budget within a frame or
+      // two of the first failure — no use against a transient error.
+      if (!spent) setTimeout(refreshReadout, READOUT_RETRY_DELAY_MS);
+      refreshReadout();
       break;
     }
     case "frameError": {

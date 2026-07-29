@@ -53,6 +53,9 @@
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
+  /* Bottom bar height, remeasured by AppUI; the fallback matches the common
+     single-line layout so controls are placed correctly before first measure. */
+  --bar-h: 140px;
 }
 
 html,
@@ -244,14 +247,24 @@ body {
 }
 
 /* Bottom-right control stack, sitting just above the attribution button so the
-   unit toggle is the control directly above it. */
+   unit toggle is the control directly above it. Offsets are measured from the
+   bottom bar's real height (--bar-h, kept up to date by AppUI): the bar grows
+   when the readout wraps on a narrow screen, and a hard-coded offset would let
+   it swallow the attribution. */
 .map-controls {
   position: absolute;
   right: calc(12px + var(--safe-right));
-  bottom: calc(186px + var(--safe-bottom));
+  bottom: calc(var(--bar-h) + 46px);
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* Only the buttons take pointer input; the gap between them stays
+     transparent to map pans and taps. */
+  pointer-events: none;
+}
+
+.map-controls > * {
+  pointer-events: auto;
 }
 
 .locate-btn,
@@ -329,14 +342,16 @@ body {
 
 /* ---- located-point forecast readout (in the time row) ---- */
 
-/* Sits immediately right of the time labels, reading as part of the same
-   "what the map shows right now" group. Allowed to wrap to its own line rather
-   than squeeze the time when the bar gets narrow. */
+/* Anchored to the row's right edge, so it holds still while the time label to
+   its left changes width ("+9h" -> "+10h" every hour of playback). It may wrap
+   to its own line on very narrow bars; --bar-h keeps the map controls clear
+   when it does. */
 .readout {
   display: flex;
   align-items: baseline;
   gap: 10px;
-  padding-left: 4px;
+  margin-left: auto;
+  padding-left: 12px;
 }
 
 .readout-metric {
@@ -354,11 +369,45 @@ body {
   color: var(--muted);
 }
 
+/* Fixed width, right-aligned: digits stay put as values cross between one, two
+   and three characters ("8°C" -> "31°C" -> "104°F"), so nothing jitters while
+   the timeline runs. Wide enough for a signed three-character reading. */
 .readout-value {
+  display: inline-block;
+  min-width: 5ch;
+  text-align: right;
   font-size: 14px;
   font-weight: 700;
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
+}
+
+/* Loading: keep the labels and stand a dithered placeholder where each value
+   will land — same 1-bit texture as the panel shadows, same footprint as the
+   text it replaces, so nothing moves when the real numbers arrive. */
+.readout-loading .readout-value {
+  height: 13px;
+  border-radius: var(--radius-sm);
+  background: var(--dither);
+  background-size: 4px 4px;
+  animation: readout-loading 1.4s ease-in-out infinite;
+}
+
+@keyframes readout-loading {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 0.15;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .readout-loading .readout-value {
+    animation: none;
+    opacity: 0.35;
+  }
 }
 
 .readout-hidden {
@@ -490,7 +539,7 @@ body {
 
 .maplibregl-ctrl-bottom-right,
 .maplibregl-ctrl-bottom-left {
-  bottom: calc(140px + var(--safe-bottom));
+  bottom: var(--bar-h);
 }
 
 /* ---- user location dot ---- */

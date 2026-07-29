@@ -119,7 +119,12 @@ hashed assets. No environment variables or server functions are required.
   requests / ~120 MB of GRIB. It also needs no GRIB decode (float32 +
   blosc/zstd, already in °C). The map's frames always load first — the readout
   waits for the first progressive pass, since the overlay is what you're
-  looking at and both share the worker and the connection.
+  looking at and both share the worker and the connection. Until the values
+  land it shows its labels over dithered placeholders sized to the text, so the
+  row reserves its space and nothing moves on arrival. The readout is anchored
+  to the bar's right edge and each value has a fixed width, so digits hold
+  still as the hour label widens ("+9h" -> "+10h") and as readings cross
+  between one and three characters.
 - The °C/°F button (bottom right, above the attribution) switches the whole UI
   between metric and imperial: temperature/dew point in °C or °F and the rain
   legend in mm/hr or in/hr. Smoke stays µg/m³ — that concentration has no

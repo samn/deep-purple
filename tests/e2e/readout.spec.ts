@@ -49,24 +49,48 @@ test.describe("forecast readout with a location", () => {
     await expect(page.locator(readout)).not.toHaveAttribute("aria-live", /.*/);
   });
 
-  test("sits in the bottom bar, to the right of the time", async ({ page }) => {
+  test("sits in the bottom bar, anchored to its right edge", async ({ page }) => {
     const box = (await page.locator(readout).boundingBox())!;
     const time = (await page.locator(".time-labels").boundingBox())!;
     const bar = (await page.locator(".bottom-bar").boundingBox())!;
 
-    // Immediately right of the time labels, sharing their line.
+    // Right of the time, and flush to the bar's right padding.
     expect(box.x).toBeGreaterThanOrEqual(time.x + time.width);
-    expect(box.x).toBeLessThan(time.x + time.width + 40);
+    const viewport = page.viewportSize()!;
+    const rightGap = viewport.width - (box.x + box.width);
+    expect(rightGap).toBeGreaterThanOrEqual(0);
+    expect(rightGap).toBeLessThanOrEqual(26);
     // Inside the bottom bar, not floating over the map.
     expect(box.y).toBeGreaterThanOrEqual(bar.y);
     expect(box.y + box.height).toBeLessThanOrEqual(bar.y + bar.height);
-    // Fits without pushing past the bar's padding, even at phone width.
-    const viewport = page.viewportSize()!;
-    expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
-    // The map controls are offset from the bottom by a fixed amount, so a
-    // readout that wrapped to its own line would grow the bar underneath them.
+    // The attribution is required, so the bar must never grow over it — its
+    // offset tracks the bar's real height rather than a fixed guess.
     const info = (await page.locator(".maplibregl-ctrl-attrib-button").boundingBox())!;
     expect(info.y + info.height).toBeLessThanOrEqual(bar.y);
+  });
+
+  test("does not shift when the forecast hour gains a digit", async ({ page }) => {
+    // "+9h" -> "+10h" widens the label to the readout's left; anchoring to the
+    // right edge is what keeps the numbers from jittering during playback.
+    const positions: number[] = [];
+    for (const hour of ["0", "9", "10", "48"]) {
+      await page.locator(".scrubber").fill(hour);
+      await expect(page.locator(".rel-label")).toHaveText(`+${hour}h`);
+      positions.push(Math.round((await page.locator(readout).boundingBox())!.x));
+    }
+    expect(new Set(positions).size).toBe(1);
+  });
+
+  test("holds each value's width so digits stay put", async ({ page }) => {
+    // Values swing between one and three characters; a fixed box keeps the
+    // whole row still rather than reflowing on every hour.
+    const widths = new Set<number>();
+    for (const hour of ["0", "12", "30"]) {
+      await page.locator(".scrubber").fill(hour);
+      await expect(page.locator(".rel-label")).toHaveText(`+${hour}h`);
+      widths.add(Math.round((await page.locator(tempValue).boundingBox())!.width));
+    }
+    expect(widths.size).toBe(1);
   });
 
   test("updates when the timeline is scrubbed", async ({ page }) => {
@@ -110,6 +134,65 @@ test.describe("forecast readout with a location", () => {
     }
     await expect(page.locator(".rel-label")).not.toHaveText("+0h");
   });
+});
+
+test.describe("loading placeholder", () => {
+  test.use({ geolocation: DENVER, permissions: ["geolocation"] });
+
+  test("shows labelled skeletons until the values arrive", async ({ context, page }) => {
+    await routeFixtures(context);
+    // Registered after the fixture catch-all so it wins for the point store,
+    // holding it open to keep the loading state observable.
+    await context.route(
+      (u) => u.href.includes("noaa-hrrr-forecast-48-hour/v0.1.0"),
+      () => {
+        /* never fulfilled */
+      },
+    );
+    await gotoApp(page);
+    await waitForLoaded(page);
+
+    // Visible and marked busy, with the labels still readable.
+    await expect(page.locator(readout)).toBeVisible();
+    await expect(page.locator(readout)).toHaveAttribute("aria-busy", "true");
+    await expect(page.locator(readout)).toHaveClass(/readout-loading/);
+    await expect(page.locator('.readout-metric[data-metric="temp"] .readout-label')).toHaveText("Temp");
+    await expect(page.locator('.readout-metric[data-metric="dew"] .readout-label')).toHaveText("Dew");
+
+    // No numbers yet, but the placeholder still occupies the value's box.
+    await expect(page.locator(tempValue)).toHaveText("");
+    const box = (await page.locator(tempValue).boundingBox())!;
+    expect(box.width).toBeGreaterThan(20);
+    expect(box.height).toBeGreaterThan(8);
+  });
+
+  test("placeholder gives way to the values without moving the row", async ({ context, page }) => {
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await routeFixtures(context);
+    await context.route(
+      (u) => u.href.includes("noaa-hrrr-forecast-48-hour/v0.1.0"),
+      async (route) => {
+        await held;
+        await route.fallback();
+      },
+    );
+    await gotoApp(page);
+    await waitForLoaded(page);
+
+    await expect(page.locator(readout)).toHaveAttribute("aria-busy", "true");
+    const loadingBox = (await page.locator(readout).boundingBox())!;
+
+    release();
+
+    await expect(page.locator(tempValue)).toHaveText(AT_0H.temp);
+    await expect(page.locator(readout)).not.toHaveAttribute("aria-busy", /.*/);
+    const loadedBox = (await page.locator(readout).boundingBox())!;
+    // Same footprint before and after, so nothing jumps as data lands.
+    expect(Math.round(loadedBox.x)).toBe(Math.round(loadingBox.x));
+    expect(Math.round(loadedBox.width)).toBe(Math.round(loadingBox.width));
+  });
+
 });
 
 test.describe("loading priority", () => {
@@ -214,6 +297,8 @@ test.describe("forecast readout without a location", () => {
     // passes when the locator matches nothing, which would not prove anything.
     await expect(page.locator(readout)).toHaveCount(1);
     await expect(page.locator(readout)).toBeHidden();
+    // Hidden outright, not left showing a skeleton that will never resolve.
+    await expect(page.locator(readout)).not.toHaveClass(/readout-loading/);
     // The rest of the app still came up.
     await expect(page.locator(".time-label")).not.toHaveText("—");
   });

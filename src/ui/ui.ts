@@ -12,6 +12,16 @@ import {
   type UnitSystem,
 } from "../lib/units.ts";
 
+/**
+ * What the readout should show. `loading` keeps the labels and stands a
+ * placeholder where each value will land, so the row doesn't jump when the
+ * numbers arrive; `hidden` is for no location at all.
+ */
+export type ReadoutState =
+  | { kind: "hidden" }
+  | { kind: "loading" }
+  | { kind: "value"; temperatureC: number; dewpointC: number };
+
 export interface UICallbacks {
   onScrub(t: number): void;
   onPlayToggle(): void;
@@ -62,8 +72,8 @@ export class AppUI {
   private readonly layers: { config: LayerConfig; colormap: Colormap }[];
   private maxHours = 48;
   private units: UnitSystem = loadUnitSystem();
-  /** Last reading, kept so a unit switch can re-render without new data. */
-  private reading: { temperatureC: number; dewpointC: number } | null = null;
+  /** Last state, kept so a unit switch can re-render without new data. */
+  private readoutState: ReadoutState = { kind: "hidden" };
 
   constructor(
     root: HTMLElement,
@@ -166,9 +176,26 @@ export class AppUI {
     this.statusEl = el("div", "status", root);
     this.setStatus("Loading forecast…", false);
 
+    this.trackBarHeight(bottom);
+
     // Paints the unit-dependent text (chip ranges, toggle label) for the
     // persisted preference.
     this.setUnits(this.units);
+  }
+
+  /**
+   * Publish the bottom bar's height as --bar-h, which positions the map
+   * controls and MapLibre's attribution. The bar is not a fixed height: it
+   * grows if the readout wraps, and with safe-area insets.
+   */
+  private trackBarHeight(bar: HTMLElement): void {
+    const apply = () => {
+      const h = Math.round(bar.getBoundingClientRect().height);
+      if (h > 0) document.documentElement.style.setProperty("--bar-h", `${h}px`);
+    };
+    if (typeof ResizeObserver === "function") new ResizeObserver(apply).observe(bar);
+    else window.addEventListener("resize", apply);
+    apply();
   }
 
   /** One labelled metric in the readout; returns the element holding its value. */
@@ -242,28 +269,29 @@ export class AppUI {
     this.playBtn.setAttribute("aria-label", playing ? "Pause animation" : "Play animation");
   }
 
-  /** Show the located-point forecast readout, or hide it when null. */
-  setReadout(reading: { temperatureC: number; dewpointC: number } | null): void {
-    this.reading = reading;
+  /** Show, hide, or show a loading placeholder for the located-point readout. */
+  setReadout(state: ReadoutState): void {
+    this.readoutState = state;
     this.renderReadout();
   }
 
   /**
-   * Paint the readout from the last reading in the current unit system. Runs on
-   * every timeline change, so the formatted strings are diffed and the DOM is
-   * only touched when a displayed value actually changes.
+   * Paint the readout in the current unit system. Runs on every timeline change,
+   * so the formatted strings are diffed and the DOM is only touched when a
+   * displayed value actually changes.
    */
   private renderReadout(): void {
-    const reading = this.reading;
-    if (!reading) {
-      this.readout.classList.add("readout-hidden");
-      return;
-    }
-    const temp = formatTemperature(reading.temperatureC, this.units);
-    const dew = formatTemperature(reading.dewpointC, this.units);
+    const state = this.readoutState;
+    this.readout.classList.toggle("readout-hidden", state.kind === "hidden");
+    this.readout.classList.toggle("readout-loading", state.kind === "loading");
+    if (state.kind === "loading") this.readout.setAttribute("aria-busy", "true");
+    else this.readout.removeAttribute("aria-busy");
+    // Empty values while loading so the placeholder boxes show through; they
+    // keep the text's footprint, so nothing shifts when the numbers land.
+    const temp = state.kind === "value" ? formatTemperature(state.temperatureC, this.units) : "";
+    const dew = state.kind === "value" ? formatTemperature(state.dewpointC, this.units) : "";
     if (this.readoutTemp.textContent !== temp) this.readoutTemp.textContent = temp;
     if (this.readoutDew.textContent !== dew) this.readoutDew.textContent = dew;
-    this.readout.classList.remove("readout-hidden");
   }
 
   setProgress(loaded: number, total: number): void {

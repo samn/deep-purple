@@ -89,6 +89,9 @@ export const POINT_STORE_URL =
  */
 export const READOUT_MAX_ATTEMPTS = 2;
 
+/** Wait before retrying a failed point read, so a retry isn't spent instantly. */
+export const READOUT_RETRY_DELAY_MS = 2000;
+
 export const BASEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
 
 /** Number of lead-time frames (0..48 h hourly). */
