@@ -4,17 +4,19 @@ import { fixtureManifest, gotoApp, routeFixtures, waitForLoaded } from "./helper
 /**
  * The point readout comes from the time-optimized store, which returns the
  * whole 48-hour series in one read — so every forecast hour is assertable, not
- * just a recorded subset. Values below are what the pinned init holds at the
- * recorded location; re-recording with `--fresh` changes them and they must be
- * updated by hand (there is no snapshot to auto-refresh).
+ * just a recorded subset. That store follows the six-hourly forecast and so is
+ * usually behind the map's init; the worker shifts its leads into map hours, and
+ * these expectations are in map hours too. Values below are what the pinned
+ * init holds at the recorded location; re-recording with `--fresh` changes them
+ * and they must be updated by hand (there is no snapshot to auto-refresh).
  */
 const DENVER = {
   longitude: fixtureManifest.point.lon,
   latitude: fixtureManifest.point.lat,
 };
-const AT_0H = { temp: "31°C", dew: "10°C" };
-const AT_12H = { temp: "22°C", dew: "11°C" };
-const AT_30H = { temp: "33°C", dew: "4°C" };
+const AT_0H = { temp: "31°C", dew: "0°C" };
+const AT_12H = { temp: "23°C", dew: "-11°C" };
+const AT_30H = { temp: "37°C", dew: "-11°C" };
 
 const readout = ".readout";
 const tempValue = '.readout-metric[data-metric="temp"] .readout-value';
@@ -73,7 +75,7 @@ test.describe("forecast readout with a location", () => {
     // "+9h" -> "+10h" widens the label to the readout's left; anchoring to the
     // right edge is what keeps the numbers from jittering during playback.
     const positions: number[] = [];
-    for (const hour of ["0", "9", "10", "48"]) {
+    for (const hour of ["0", "9", "10", String(fixtureManifest.maxHours)]) {
       await page.locator(".scrubber").fill(hour);
       await expect(page.locator(".rel-label")).toHaveText(`+${hour}h`);
       positions.push(Math.round((await page.locator(readout).boundingBox())!.x));
@@ -134,8 +136,8 @@ test.describe("forecast readout with a location", () => {
   });
 
   test("resolves every forecast hour, not just a coarse subset", async ({ page }) => {
-    // The time-optimized store returns all 49 leads in one read, so a lead that
-    // is not on any coarse stride still reads exactly.
+    // The time-optimized store returns all 49 leads in one read, so an hour
+    // that is not on any coarse stride still reads exactly.
     await page.locator(".scrubber").fill("12");
     await expect(page.locator(".rel-label")).toHaveText("+12h");
     await expect(page.locator(tempValue)).toHaveText(AT_12H.temp);
@@ -245,9 +247,9 @@ test.describe("loading priority", () => {
     const firstPoint = order.indexOf("point");
     expect(firstPoint).toBeGreaterThan(-1);
     const framesFirst = order.slice(0, firstPoint).filter((k) => k === "frame").length;
-    // The first progressive pass is 9 coarse leads x 2 layers; all of it is
-    // requested before the readout touches the network.
-    expect(framesFirst).toBeGreaterThanOrEqual(18);
+    // The whole first progressive pass — every coarse lead, for both layers —
+    // is requested before the readout touches the network.
+    expect(framesFirst).toBeGreaterThanOrEqual(fixtureManifest.coarseLeads.length * 2);
   });
 });
 
@@ -262,13 +264,13 @@ test.describe("unit toggle", () => {
 
   test("switches the readout between Celsius and Fahrenheit", async ({ page }) => {
     await expect(page.locator(tempValue)).toHaveText("31°C");
-    await expect(page.locator(dewValue)).toHaveText("10°C");
+    await expect(page.locator(dewValue)).toHaveText("0°C");
 
     await page.locator(unitBtn).click();
 
-    // 31.33°C -> 88°F, 9.77°C -> 50°F.
-    await expect(page.locator(tempValue)).toHaveText("88°F");
-    await expect(page.locator(dewValue)).toHaveText("50°F");
+    // 30.75°C -> 87°F, -0.33°C -> 31°F.
+    await expect(page.locator(tempValue)).toHaveText("87°F");
+    await expect(page.locator(dewValue)).toHaveText("31°F");
 
     await page.locator(unitBtn).click();
     await expect(page.locator(tempValue)).toHaveText("31°C");
@@ -306,12 +308,12 @@ test.describe("unit toggle", () => {
 
   test("remembers the choice across a reload", async ({ page }) => {
     await page.locator(unitBtn).click();
-    await expect(page.locator(tempValue)).toHaveText("88°F");
+    await expect(page.locator(tempValue)).toHaveText("87°F");
 
     await gotoApp(page);
     await waitForLoaded(page);
     await expect(page.locator(unitBtn)).toHaveText("°F");
-    await expect(page.locator(tempValue)).toHaveText("88°F");
+    await expect(page.locator(tempValue)).toHaveText("87°F");
   });
 });
 

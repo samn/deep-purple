@@ -1,9 +1,9 @@
-# Smoke & Rain — 48-hour HRRR forecast map
+# Smoke & Rain — HRRR forecast map
 
-A static single-page app that animates the next 48 hours of NOAA HRRR
+A static single-page app that animates the next two days of NOAA HRRR
 forecasts — **near-surface smoke** and **precipitation rate** — on a map
 centered on your location. All data is read directly in the browser from
-[dynamical.org](https://dynamical.org)'s icechunk store; there is no backend.
+[dynamical.org](https://dynamical.org)'s icechunk stores; there is no backend.
 
 <img src="docs/screenshot-desktop.png" alt="Desktop screenshot" width="720" />
 <img src="docs/screenshot-mobile.png" alt="Mobile screenshot" width="200" />
@@ -11,23 +11,35 @@ centered on your location. All data is read directly in the browser from
 ## How it works
 
 1. **[icechunk-js](https://github.com/EarthyScience/icechunk-js) + [zarrita](https://github.com/manzt/zarrita.js)**
-   open the [NOAA HRRR forecast, 48 hour, virtual](https://dynamical.org/catalog/noaa-hrrr-forecast-48-hour-virtual/)
-   icechunk repository straight from S3. Chunks are *virtual*: byte ranges
-   into NOAA's original GRIB2 files on `noaa-hrrr-bdp-pds` (both buckets are
-   public + CORS-enabled). That store is *map-optimized* — one whole grid per
-   (init, lead), which is what painting a frame wants; the point readout reads
-   its *time-optimized* sibling instead (see Data & attribution).
-2. A **pure-TypeScript GRIB2 decoder** (`src/lib/grib/decoder.ts`, registered
+   open two icechunk repositories straight from S3: the
+   [18 hour](https://dynamical.org/catalog/noaa-hrrr-forecast-18-hour-virtual/)
+   and [48 hour](https://dynamical.org/catalog/noaa-hrrr-forecast-48-hour-virtual/)
+   HRRR forecasts. Chunks are *virtual*: byte ranges into NOAA's original
+   GRIB2 files on `noaa-hrrr-bdp-pds` (all buckets are public + CORS-enabled).
+   Both are *map-optimized* — one whole grid per (init, lead), which is what
+   painting a frame wants; the point readout reads a *time-optimized* store
+   instead (see Data & attribution).
+2. The two runs are **spliced on valid time** (`src/lib/splice.ts`). HRRR runs
+   the 18-hour forecast every hour and the 48-hour one only at 00/06/12/18 UTC,
+   so neither alone is what you want: the hourly run is fresher (and more
+   skilful) but stops at +18 h, while the six-hourly run reaches +48 h with a
+   nose up to five hours stale. Every forecast hour is served by whichever run
+   has the newest init that still reaches it, and hour 0 of the timeline is the
+   newest init in play. One consequence is that the timeline is not always 48
+   hours long: with the six-hourly run five hours behind, +48 h of *that* run is
+   +43 h of the timeline, and that is where the scrubber ends. Losing a store
+   is survivable — the map falls back to whatever the other one covers.
+3. A **pure-TypeScript GRIB2 decoder** (`src/lib/grib/decoder.ts`, registered
    as the store's `gribberish` zarr codec) decodes complex-packed messages
    (DRS templates 5.0/5.2/5.3) — no WASM, no COOP/COEP headers needed. Unit
    tests cross-validate it element-wise against the native
    [gribberish](https://github.com/mpiannucci/gribberish) library.
-3. A **Web Worker** owns both stores, finds the latest complete forecast init
-   (1-byte manifest probes), and streams frames progressively (every 6 h
+4. A **Web Worker** owns every store, finds each one's latest complete forecast
+   init (1-byte manifest probes), and streams frames progressively (every 6 h
    first — playable after ~5 MB — then 3 h, then hourly; ~35 MB total).
    Fields are quantized to log-scale bytes (block-max downsampled 2× on
    phones).
-4. Frames render on the **GPU** via a MapLibre custom layer: a fragment
+5. Frames render on the **GPU** via a MapLibre custom layer: a fragment
    shader inverts each screen pixel through the Lambert conformal projection,
    crossfades two quantized frame textures, and applies the palette LUT — so
    animation costs the CPU almost nothing. Where WebGL2 (or the shader) won't
@@ -78,6 +90,10 @@ npm run record-fixtures -- --fresh                        # re-record from scrat
   with `--fresh`, update those expected values too. It also asserts the loading
   priority — that the first progressive frame pass is fully requested before
   the point store is touched.
+- Recording freezes both map stores, and with them the splice. The manifest
+  carries the results out to the specs — `maxHours` (where the timeline ends),
+  `stores` (each run's init and how many hours it serves) and `coarseLeads` —
+  so nothing hard-codes a 48-hour forecast that a given recording may not have.
 
 ## Deploy (Cloudflare)
 
@@ -96,7 +112,7 @@ hashed assets. No environment variables or server functions are required.
 
 - Forecast data: [NOAA HRRR](https://rapidrefresh.noaa.gov/hrrr/), processed
   and served by [dynamical.org](https://dynamical.org)
-  ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)); store version
+  ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)); store versions
   pinned in `src/config.ts`.
 - Basemap: [OpenFreeMap](https://openfreemap.org) /
   © [OpenMapTiles](https://openmaptiles.org) data from
@@ -106,19 +122,25 @@ hashed assets. No environment variables or server functions are required.
   `public/fonts/`.
 - Smoke is HRRR's near-surface smoke tracer (`mass_density_8m`, µg/m³, ~8 m
   AGL); rain is instantaneous precipitation rate (`precipitation_rate_surface`,
-  mm/hr). New forecasts are published every 6 hours (00/06/12/18 UTC); the app
-  always shows the most recent complete run.
+  mm/hr). HRRR publishes an 18-hour forecast every hour and a 48-hour forecast
+  at 00/06/12/18 UTC; the app splices the most recent complete run of each, so
+  the hours it can show from the hourly run are at most an hour old and the
+  rest fall back to the six-hourly one.
 - With a location fix, the bottom bar reads out the forecast for that point
   beside the valid time: 2 m temperature (`temperature_2m`) and dew point
   (`dew_point_temperature_2m`), read from dynamical.org's **time-optimized**
   [`noaa-hrrr-forecast-48-hour`](https://dynamical.org/catalog/noaa-hrrr-forecast-48-hour/)
-  store rather than the map's. Same forecast, rechunked: all 49 lead times sit
-  in one chunk (sharded over y/x), so a cell's whole 48-hour series is a single
+  store rather than the map's. Same 48-hour forecast, rechunked: all 49 lead
+  times sit in one chunk (sharded over y/x), so a cell's whole 48-hour series is a single
   ~3 MB read per variable — 6 requests / 6.4 MB at full hourly resolution,
   where pulling the same series from the map-optimized store would be ~109
   requests / ~120 MB of GRIB. It also needs no GRIB decode (float32 +
-  blosc/zstd, already in °C). The map's frames always load first — the readout
-  waits for the first progressive pass, since the overlay is what you're
+  blosc/zstd, already in °C). dynamical.org publishes no time-optimized sibling
+  for the hourly 18-hour product, so the readout stays on the six-hourly run
+  even where the map's frames come from a fresher one; the worker shifts the
+  series by the gap between the two inits, so the numbers always describe the
+  hour on screen. The map's frames always load first — the readout waits for
+  the first progressive pass, since the overlay is what you're
   looking at and both share the worker and the connection. Until the values
   land it shows its labels over dithered placeholders occupying the value's
   exact box, so the row reserves its space and nothing moves on arrival. Each

@@ -16,7 +16,7 @@ export interface TimelineOptions {
 export class Timeline {
   t = 0;
   playing = false;
-  readonly maxHours: number;
+  maxHours: number;
   speed: number;
 
   private readonly raf: (cb: (ts: number) => void) => number;
@@ -34,6 +34,20 @@ export class Timeline {
 
   onChange(cb: () => void): void {
     this.listeners.push(cb);
+  }
+
+  /**
+   * Change the end of the timeline. The forecast's length is only known once
+   * the stores are open — it depends how far apart the spliced runs' inits are
+   * — so the current time is pulled back inside the new range if it now sits
+   * past the end.
+   */
+  setMaxHours(maxHours: number): void {
+    this.maxHours = maxHours;
+    if (this.t > maxHours) {
+      this.t = maxHours;
+      this.emit();
+    }
   }
 
   private emit(): void {

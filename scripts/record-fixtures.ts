@@ -1,9 +1,15 @@
 /**
  * Records the HTTP traffic needed for deterministic Playwright tests: opens
- * the real icechunk store, loads the coarse-pass frames for both overlay
- * layers, and samples the point-readout variables, saving every request body
- * to tests/fixtures/http/ plus a manifest keyed by URL + Range header. The
- * Playwright suite replays these with page.route.
+ * the real icechunk stores, splices them exactly as the worker does, loads the
+ * coarse-pass frames for both overlay layers, and samples the point-readout
+ * variables, saving every request body to tests/fixtures/http/ plus a manifest
+ * keyed by URL + Range header. The Playwright suite replays these with
+ * page.route.
+ *
+ * Because everything the app reads is replayed — including the coordinate
+ * arrays and chunk manifests — the recorded stores are frozen at record time,
+ * and with them the splice: the init times, which store serves each hour, and
+ * how far the timeline reaches. The manifest carries those out to the specs.
  *
  * Incremental by default: bodies already in the manifest are replayed from
  * disk rather than refetched, so the recorded init time — and therefore the
@@ -19,13 +25,14 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { LAYERS, POINT_STORE_URL, POINT_VARIABLES, STORE_URL } from "../src/config.ts";
+import { LAYERS, LOAD_PASSES, MAP_STORE_URLS, POINT_STORE_URL, POINT_VARIABLES } from "../src/config.ts";
 import { HRRR_GRID, makeGridTransform } from "../src/lib/lcc.ts";
+import { spliceRuns } from "../src/lib/splice.ts";
 import { loadField, loadPointSeries, openHrrrDataset, openPointDataset } from "../src/lib/store.ts";
+import { progressiveLeadOrder } from "../src/worker/schedule.ts";
 
 const OUT_DIR = join(import.meta.dirname, "..", "tests", "fixtures", "http");
 const MANIFEST = join(OUT_DIR, "manifest.json");
-const COARSE_LEADS = [0, 6, 12, 18, 24, 30, 36, 42, 48];
 /**
  * Location whose point readout the e2e specs assert on; must match the
  * geolocation they set. One read covers every lead, so no lead list is needed.
@@ -100,33 +107,70 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   return res;
 }) as typeof fetch;
 
-const dataset = await openHrrrDataset(
-  STORE_URL,
-  LAYERS.map((l) => ({ name: l.arrayName, scale: l.scale })),
+const datasets = await Promise.all(
+  MAP_STORE_URLS.map((url) =>
+    openHrrrDataset(
+      url,
+      LAYERS.map((l) => ({ name: l.arrayName, scale: l.scale })),
+    ),
+  ),
 );
-const initTime = dataset.initTimes[dataset.latestInitIndex]!;
-console.log(`\nrecording init ${initTime.toISOString()} (index ${dataset.latestInitIndex})`);
+const timeline = spliceRuns(
+  datasets.map((d) => ({
+    initTimeMs: d.initTimes[d.latestInitIndex]!.getTime(),
+    leadHours: d.leadTimeHours,
+  })),
+);
+const initTime = new Date(timeline.initTimeMs);
+const maxHours = timeline.leadHours.at(-1)!;
+datasets.forEach((d, i) => {
+  const frames = timeline.sources.filter((s) => s.runIndex === i).length;
+  console.log(
+    `store ${MAP_STORE_URLS[i]}\n  init ${d.initTimes[d.latestInitIndex]!.toISOString()} ` +
+    `(index ${d.latestInitIndex}), serving ${frames} of the spliced timeline's hours`,
+  );
+});
+console.log(`\nrecording init ${initTime.toISOString()}, +0..+${maxHours}h`);
 
+// Exactly the frames the app's first progressive pass asks for, each from the
+// store the splice picked for that hour.
+const coarseLeads = progressiveLeadOrder(timeline.leadHours.length, LOAD_PASSES)[0]!;
 for (const layer of LAYERS) {
-  for (const lead of COARSE_LEADS) {
-    await loadField(dataset, { name: layer.arrayName, scale: layer.scale }, dataset.latestInitIndex, lead);
+  for (const lead of coarseLeads) {
+    const source = timeline.sources[lead]!;
+    const dataset = datasets[source.runIndex]!;
+    await loadField(
+      dataset,
+      { name: layer.arrayName, scale: layer.scale },
+      dataset.latestInitIndex,
+      source.leadIndex,
+    );
   }
 }
 
-// Point readout: a separate, time-optimized store, read at the same init the
-// map is pinned to so the recorded numbers match the recorded frames.
+// Point readout: a separate, time-optimized store with its own (six-hourly)
+// publishing schedule. The worker takes its newest init at or before the start
+// of the map's timeline and reports the series in map hours; record the same
+// init so the fixtures replay that choice.
 const pointDataset = await openPointDataset(
   POINT_STORE_URL,
   POINT_VARIABLES.map((v) => v.arrayName),
 );
-const pointInitIndex = pointDataset.initTimes.findIndex(
-  (d) => d.getTime() === initTime.getTime(),
-);
+let pointInitIndex = -1;
+for (let i = pointDataset.initTimes.length - 1; i >= 0; i--) {
+  if (pointDataset.initTimes[i]!.getTime() <= timeline.initTimeMs) {
+    pointInitIndex = i;
+    break;
+  }
+}
 if (pointInitIndex === -1) {
   throw new Error(
-    `point store has no init at ${initTime.toISOString()}; cannot record a consistent readout`,
+    `point store has no init at or before ${initTime.toISOString()}; cannot record a readout`,
   );
 }
+console.log(
+  `point store init ${pointDataset.initTimes[pointInitIndex]!.toISOString()} (index ${pointInitIndex})`,
+);
 const [pcol, prow] = makeGridTransform(HRRR_GRID).lonLatToGrid(POINT_LON, POINT_LAT);
 for (const v of POINT_VARIABLES) {
   await loadPointSeries(
@@ -158,8 +202,15 @@ const manifest = {
   recordedAt: new Date().toISOString(),
   initTimeMs: initTime.getTime(),
   initTimeIso: initTime.toISOString(),
-  latestInitIndex: dataset.latestInitIndex,
-  coarseLeads: COARSE_LEADS,
+  /** Last hour of the spliced timeline; not always 48. */
+  maxHours,
+  stores: MAP_STORE_URLS.map((url, i) => ({
+    url,
+    initTimeIso: datasets[i]!.initTimes[datasets[i]!.latestInitIndex]!.toISOString(),
+    latestInitIndex: datasets[i]!.latestInitIndex,
+    frames: timeline.sources.filter((s) => s.runIndex === i).length,
+  })),
+  coarseLeads,
   point: { lon: POINT_LON, lat: POINT_LAT },
   entries: [...entries.values()],
 };

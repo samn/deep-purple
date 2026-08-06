@@ -1,8 +1,32 @@
 /** Application configuration: data store, variables, rendering. */
 import type { Quantity } from "./lib/units.ts";
 
-export const STORE_URL =
+/**
+ * NOAA HRRR, 18-hour forecast, map-optimized virtual store
+ * (dynamical.org/catalog/noaa-hrrr-forecast-18-hour-virtual). HRRR runs this
+ * forecast **every hour**, so it is at most an hour old — six times fresher
+ * than the 48-hour product below, and correspondingly more skilful. It only
+ * reaches +18 h.
+ */
+export const STORE_18H_URL =
+  "https://dynamical-noaa-hrrr.s3.amazonaws.com/noaa-hrrr-forecast-18-hour-virtual/v0.1.0.icechunk";
+
+/**
+ * NOAA HRRR, 48-hour forecast, map-optimized virtual store
+ * (dynamical.org/catalog/noaa-hrrr-forecast-48-hour-virtual). Run only at
+ * 00/06/12/18 UTC, so its nose can be five hours stale — but it is the only
+ * source for anything past +18 h, and carries the timeline's tail.
+ */
+export const STORE_48H_URL =
   "https://dynamical-noaa-hrrr.s3.amazonaws.com/noaa-hrrr-forecast-48-hour-virtual/v0.5.0.icechunk";
+
+/**
+ * Map stores in preference order for `spliceRuns`, which joins them on valid
+ * time: the hourly run serves the hours it covers, the six-hourly run extends
+ * the timeline to +48 h. Order only breaks ties between runs with the same
+ * init — otherwise the newer init always wins.
+ */
+export const MAP_STORE_URLS = [STORE_18H_URL, STORE_48H_URL];
 
 export interface LayerConfig {
   id: "precip" | "smoke";
@@ -72,13 +96,20 @@ export const POINT_VARIABLES: PointVariable[] = [TEMPERATURE_VARIABLE, DEWPOINT_
  * Time-optimized companion store for the point readout
  * (dynamical.org/catalog/noaa-hrrr-forecast-48-hour).
  *
- * The map reads the *map-optimized* virtual store, whose chunks are one whole
+ * The map reads *map-optimized* virtual stores, whose chunks are one whole
  * grid per (init, lead) — ideal for painting a frame, terrible for one cell:
  * 49 leads x 2 variables would be ~118 MB of GRIB to read 98 numbers. This
  * store holds the same forecast rechunked with all 49 lead times together and
  * sharded across y/x, so a single cell's entire 48-hour series is one ~3 MB
  * inner-chunk read per variable — the whole readout costs ~6 MB at full hourly
  * resolution. Values arrive in °C, float32, blosc/zstd (no GRIB decode).
+ *
+ * dynamical.org publishes no time-optimized sibling for the hourly 18-hour
+ * product, so the readout stays on the six-hourly run even where the map's
+ * frames come from a fresher one. It is aligned to the map by **valid time**
+ * (the worker shifts the series by the gap between the two inits), so the
+ * numbers always describe the hour on screen — they are just drawn from a run
+ * up to five hours older than the overlay beside them.
  */
 export const POINT_STORE_URL =
   "https://dynamical-noaa-hrrr.s3.us-west-2.amazonaws.com/noaa-hrrr-forecast-48-hour/v0.1.0.icechunk";
@@ -93,9 +124,6 @@ export const READOUT_MAX_ATTEMPTS = 2;
 export const READOUT_RETRY_DELAY_MS = 2000;
 
 export const BASEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
-
-/** Number of lead-time frames (0..48 h hourly). */
-export const NUM_LEADS = 49;
 
 /** Progressive loading passes: hour strides, coarse first. */
 export const LOAD_PASSES = [6, 3, 1];

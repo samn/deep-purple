@@ -37,6 +37,47 @@ test.describe("playback", () => {
     await expect(page.locator(".play-btn")).toHaveAttribute("aria-label", "Pause animation");
   });
 
+  test("runs from the freshest init to the end of the spliced forecast", async ({ page }) => {
+    // Hour 0 is the hourly 18-hour run's init — five hours ahead of the
+    // six-hourly run in these fixtures — and the timeline reaches as far as the
+    // six-hourly run's +48 h lands from there, which is short of +48.
+    const init = new Date(fixtureManifest.initTimeMs).toISOString();
+    expect(fixtureManifest.stores[0]!.initTimeIso).toBe(init);
+    expect(fixtureManifest.stores[1]!.initTimeIso).not.toBe(init);
+    expect(fixtureManifest.maxHours).toBeLessThan(48);
+
+    await expect(page.locator(".scrubber")).toHaveAttribute(
+      "max",
+      String(fixtureManifest.maxHours),
+    );
+    // The axis is labelled for the range that exists, not a fixed 0–48.
+    const ticks = await page.locator(".axis-tick").allTextContents();
+    expect(ticks.at(-1)).toBe(`+${fixtureManifest.maxHours}h`);
+    expect(ticks[0]).toBe("0h");
+
+    // Scrubbing to the far end lands on the last hour that has frames, not on
+    // a nominal +48 h the stores cannot serve.
+    await page.locator(".scrubber").press("End");
+    await expect(page.locator(".rel-label")).toHaveText(`+${fixtureManifest.maxHours}h`);
+  });
+
+  test("draws frames from both spliced stores", async ({ context }) => {
+    // The hourly run covers 0–18 h and the six-hourly one carries the tail; if
+    // the splice collapsed to one store, the map would either stop at +18 h or
+    // lose the fresher nose it was introduced for.
+    expect(fixtureManifest.stores.map((s) => s.frames)).toEqual([19, 25]);
+
+    const hosts = new Set<string>();
+    const page = await context.newPage();
+    page.on("request", (req) => {
+      const m = /noaa-hrrr-forecast-(18|48)-hour-virtual/.exec(req.url());
+      if (m) hosts.add(m[1]!);
+    });
+    await gotoApp(page);
+    await waitForLoaded(page);
+    expect([...hosts].sort()).toEqual(["18", "48"]);
+  });
+
   test("valid-time label reflects the forecast init time", async ({ page }) => {
     const init = new Date(fixtureManifest.initTimeMs);
     const expected = new Intl.DateTimeFormat("en-US", {
