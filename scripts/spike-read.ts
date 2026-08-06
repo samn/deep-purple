@@ -1,9 +1,11 @@
 /**
- * End-to-end spike: open the real store, find the latest complete init, read
- * one precip + one smoke field through zarrita + the gribberish codec, and
- * report network usage. Usage: node --experimental-strip-types scripts/spike-read.ts
+ * End-to-end spike: open both real map stores, find each one's latest complete
+ * init, splice them into the timeline the app shows, read one precip + one
+ * smoke field through zarrita + the gribberish codec, and report network usage.
+ * Usage: node --experimental-strip-types scripts/spike-read.ts
  */
-import { PRECIP_LAYER, SMOKE_LAYER, STORE_URL } from "../src/config.ts";
+import { MAP_STORE_URLS, PRECIP_LAYER, SMOKE_LAYER } from "../src/config.ts";
+import { spliceRuns } from "../src/lib/splice.ts";
 import { loadField, openHrrrDataset } from "../src/lib/store.ts";
 import { unitLabel } from "../src/lib/units.ts";
 
@@ -21,14 +23,37 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 
 const t0 = performance.now();
-const ds = await openHrrrDataset(STORE_URL, [
-  { name: PRECIP_LAYER.arrayName, scale: PRECIP_LAYER.scale },
-  { name: SMOKE_LAYER.arrayName, scale: SMOKE_LAYER.scale },
-]);
+const datasets = await Promise.all(
+  MAP_STORE_URLS.map((url) =>
+    openHrrrDataset(url, [
+      { name: PRECIP_LAYER.arrayName, scale: PRECIP_LAYER.scale },
+      { name: SMOKE_LAYER.arrayName, scale: SMOKE_LAYER.scale },
+    ]),
+  ),
+);
 console.log(`\nopened in ${(performance.now() - t0).toFixed(0)}ms; ${requests} requests, ${(bytes / 1024 / 1024).toFixed(2)}MB`);
-console.log(`inits: ${ds.initTimes.length}, latest complete: #${ds.latestInitIndex} = ${ds.initTimes[ds.latestInitIndex]!.toISOString()}`);
-console.log(`leads: ${ds.leadTimeHours.length} (${ds.leadTimeHours[0]}..${ds.leadTimeHours.at(-1)}h)`);
+datasets.forEach((d, i) => {
+  console.log(`\n${MAP_STORE_URLS[i]}`);
+  console.log(`  inits: ${d.initTimes.length}, latest complete: #${d.latestInitIndex} = ${d.initTimes[d.latestInitIndex]!.toISOString()}`);
+  console.log(`  leads: ${d.leadTimeHours.length} (${d.leadTimeHours[0]}..${d.leadTimeHours.at(-1)}h)`);
+});
 
+const timeline = spliceRuns(
+  datasets.map((d) => ({
+    initTimeMs: d.initTimes[d.latestInitIndex]!.getTime(),
+    leadHours: d.leadTimeHours,
+  })),
+);
+const perStore = timeline.sources.reduce<Record<number, number>>((acc, s) => {
+  acc[s.runIndex] = (acc[s.runIndex] ?? 0) + 1;
+  return acc;
+}, {});
+console.log(
+  `\nspliced: ${timeline.leadHours.length} hours from ${new Date(timeline.initTimeMs).toISOString()} ` +
+  `(+0..+${timeline.leadHours.at(-1)}h); frames per store: ${JSON.stringify(perStore)}`,
+);
+
+const ds = datasets[0]!;
 for (const layer of [PRECIP_LAYER, SMOKE_LAYER]) {
   const t1 = performance.now();
   const { values, ny, nx } = await loadField(ds, { name: layer.arrayName, scale: layer.scale }, ds.latestInitIndex, 6);

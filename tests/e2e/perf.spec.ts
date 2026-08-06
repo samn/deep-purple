@@ -86,7 +86,8 @@ for (const mode of [
     await page.goto(`/${mode.query}`);
     await waitForLoaded(page);
 
-    // Play from 0h so the 6s window (6 h/s playback) stays inside 48h.
+    // Play from 0h so the 6s window (6 h/s playback) stays inside the forecast
+    // and never loops back around during sampling.
     await page.locator(".scrubber").fill("0");
     await page.locator(".play-btn").click();
 

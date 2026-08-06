@@ -5,7 +5,17 @@ import type { BrowserContext, Page } from "@playwright/test";
 const FIXTURE_DIR = join(import.meta.dirname, "..", "fixtures", "http");
 
 interface FixtureManifest {
+  /** Hour 0 of the spliced timeline: the newest recorded init. */
   initTimeMs: number;
+  /**
+   * Last forecast hour the recorded stores splice to. Depends on the gap
+   * between the two runs' inits, so it is not always 48 — specs that scrub to
+   * the end of the timeline must read it from here.
+   */
+  maxHours: number;
+  /** One entry per spliced map store, newest init first in `MAP_STORE_URLS` order. */
+  stores: { url: string; initTimeIso: string; latestInitIndex: number; frames: number }[];
+  /** Frame indices the app's first progressive pass requests. */
   coarseLeads: number[];
   /** Location whose point-readout series is recorded. */
   point: { lon: number; lat: number };

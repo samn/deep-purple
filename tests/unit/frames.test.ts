@@ -118,6 +118,32 @@ describe("Timeline", () => {
     expect(tl.t).toBe(48);
   });
 
+  it("shortens to the spliced forecast's length, pulling the clock back inside", () => {
+    // The timeline starts at the 48 h maximum and narrows once the stores are
+    // open, so a time already past the real end has to come back.
+    const driver = manualRaf();
+    const tl = new Timeline({ maxHours: 48, raf: driver.raf, caf: driver.caf });
+    let events = 0;
+    tl.onChange(() => events++);
+
+    tl.scrubTo(46);
+    tl.setMaxHours(43);
+    expect(tl.maxHours).toBe(43);
+    expect(tl.t).toBe(43);
+    expect(events).toBe(2); // the scrub, then the clamp
+
+    // Already inside the new range: nothing moves, nothing is emitted.
+    tl.setMaxHours(40);
+    expect(tl.t).toBe(40);
+    tl.setMaxHours(43);
+    expect(tl.t).toBe(40);
+    expect(events).toBe(3);
+
+    // And the shorter range is what scrubbing now clamps to.
+    tl.scrubTo(99);
+    expect(tl.t).toBe(43);
+  });
+
   it("emits change events on play, pause, and scrub", () => {
     const driver = manualRaf();
     const tl = new Timeline({ maxHours: 48, raf: driver.raf, caf: driver.caf });

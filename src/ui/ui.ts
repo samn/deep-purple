@@ -32,6 +32,9 @@ export interface UICallbacks {
 const PLAY_ICON = "&#9654;";
 const PAUSE_ICON = "&#10074;&#10074;";
 
+/** Labels under the scrubber, evenly spaced from hour 0 to the last hour. */
+const AXIS_TICKS = 5;
+
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   className: string,
@@ -70,6 +73,7 @@ export class AppUI {
   private readonly ranges = new Map<string, HTMLElement>();
   private readonly chips = new Map<string, HTMLButtonElement>();
   private readonly layers: { config: LayerConfig; colormap: Colormap }[];
+  private readonly axisTicks: HTMLElement[] = [];
   private maxHours = 48;
   private units: UnitSystem = loadUnitSystem();
   /** Last state, kept so a unit switch can re-render without new data. */
@@ -164,11 +168,13 @@ export class AppUI {
     this.nowTick = el("div", "now-tick", sliderWrap);
     this.nowTick.style.display = "none";
 
+    // Evenly spaced ticks across the scrubber. The forecast does not always
+    // reach +48 h — how far the spliced runs' inits are apart decides that — so
+    // the labels are derived from the range rather than fixed, and setMaxHours
+    // relabels them.
     const axis = el("div", "axis-row", bottom);
-    for (const h of [0, 12, 24, 36, 48]) {
-      const tick = el("span", "axis-tick", axis);
-      tick.textContent = h === 0 ? "0h" : `+${h}h`;
-    }
+    for (let i = 0; i < AXIS_TICKS; i++) this.axisTicks.push(el("span", "axis-tick", axis));
+    this.labelAxis();
 
     this.progressWrap = el("div", "progress-wrap", bottom);
     this.progressBar = el("div", "progress-bar", this.progressWrap);
@@ -240,6 +246,14 @@ export class AppUI {
   setMaxHours(h: number): void {
     this.maxHours = h;
     this.slider.max = String(h);
+    this.labelAxis();
+  }
+
+  private labelAxis(): void {
+    this.axisTicks.forEach((tick, i) => {
+      const h = Math.round((this.maxHours * i) / (AXIS_TICKS - 1));
+      tick.textContent = h === 0 ? "0h" : `+${h}h`;
+    });
   }
 
   setInit(initDate: Date): void {

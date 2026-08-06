@@ -9,10 +9,11 @@
 import { deflateSync } from "node:zlib";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { LAYERS, STORE_URL } from "../src/config.ts";
+import { LAYERS, MAP_STORE_URLS } from "../src/config.ts";
 import { makeLut, makeQuantizer, quantizeField, PRECIP_COLORMAP, SMOKE_COLORMAP } from "../src/lib/colormap.ts";
 import { HRRR_GRID } from "../src/lib/lcc.ts";
 import { buildIndexMap, lonLatToMercator } from "../src/lib/reproject.ts";
+import { spliceRuns } from "../src/lib/splice.ts";
 import { loadField, openHrrrDataset } from "../src/lib/store.ts";
 
 const FIXTURE_DIR = join(import.meta.dirname, "..", "tests", "fixtures", "http");
@@ -103,9 +104,21 @@ function encodeIndexedPng(indices: Uint8Array, w: number, h: number, lut: Uint8C
 // ---- render frames ----
 
 const map = buildIndexMap(HRRR_GRID, WIDTH, HRRR_GRID.ny, HRRR_GRID.nx);
-const dataset = await openHrrrDataset(
-  STORE_URL,
-  LAYERS.map((l) => ({ name: l.arrayName, scale: l.scale })),
+// Same splice the worker builds, so `manifest.coarseLeads` index the same
+// hours here as they do in the app.
+const datasets = await Promise.all(
+  MAP_STORE_URLS.map((url) =>
+    openHrrrDataset(
+      url,
+      LAYERS.map((l) => ({ name: l.arrayName, scale: l.scale })),
+    ),
+  ),
+);
+const timeline = spliceRuns(
+  datasets.map((d) => ({
+    initTimeMs: d.initTimes[d.latestInitIndex]!.getTime(),
+    leadHours: d.leadTimeHours,
+  })),
 );
 
 const COLORMAPS = { smoke: SMOKE_COLORMAP, precip: PRECIP_COLORMAP } as const;
@@ -115,11 +128,13 @@ for (const layer of LAYERS) {
   const q = makeQuantizer(COLORMAPS[layer.id]);
   const lut = makeLut(COLORMAPS[layer.id]);
   for (const lead of manifest.coarseLeads) {
+    const source = timeline.sources[lead]!;
+    const dataset = datasets[source.runIndex]!;
     const { values, ny, nx } = await loadField(
       dataset,
       { name: layer.arrayName, scale: layer.scale },
       dataset.latestInitIndex,
-      lead,
+      source.leadIndex,
     );
     const { data } = quantizeField(q, values, ny, nx, 1);
     const px = new Uint8Array(map.width * map.height);
@@ -172,9 +187,11 @@ const gradient = (cm: typeof SMOKE_COLORMAP) =>
     .map((s, i) => `rgba(${s.color[0]},${s.color[1]},${s.color[2]},${(s.color[3] / 255).toFixed(2)}) ${((i / (cm.stops.length - 1)) * 100).toFixed(0)}%`)
     .join(", ")})`;
 
+const maxHours = timeline.leadHours.at(-1)!;
 const DATA = JSON.stringify({
   initTimeMs: manifest.initTimeMs,
   leads: manifest.coarseLeads,
+  maxHours,
   frames,
 });
 
@@ -278,8 +295,11 @@ const html = `<title>Smoke & Rain — HRRR forecast preview</title>
         <button class="play-btn" id="play" aria-label="Play animation">&#9654;</button>
         <div><span class="time-label" id="time-label">—</span><span class="rel-label" id="rel-label">+0h</span></div>
       </div>
-      <input class="scrubber" id="scrubber" type="range" min="0" max="48" step="0.1" value="0" aria-label="Forecast hour" />
-      <div class="axis-row"><span>0h</span><span>+12h</span><span>+24h</span><span>+36h</span><span>+48h</span></div>
+      <input class="scrubber" id="scrubber" type="range" min="0" max="${maxHours}" step="0.1" value="0" aria-label="Forecast hour" />
+      <div class="axis-row">${[0, 1, 2, 3, 4]
+        .map((i) => Math.round((maxHours * i) / 4))
+        .map((h) => `<span>${h === 0 ? "0h" : `+${h}h`}</span>`)
+        .join("")}</div>
     </div>
   </div>
 </div>
@@ -332,7 +352,7 @@ function tick(ts) {
   if (!playing) return;
   if (lastTs !== null) {
     t += Math.min(0.25, (ts - lastTs) / 1000) * 6;
-    if (t > 48) t = 0;
+    if (t > DATA.maxHours) t = 0;
     render();
   }
   lastTs = ts;

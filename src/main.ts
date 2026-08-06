@@ -4,11 +4,11 @@ import "./style.css";
 import {
   BASEMAP_STYLE_URL,
   LAYERS,
+  MAP_STORE_URLS,
   PRECIP_LAYER,
   READOUT_MAX_ATTEMPTS,
   READOUT_RETRY_DELAY_MS,
   SMOKE_LAYER,
-  STORE_URL,
 } from "./config.ts";
 import { makeLut, PRECIP_COLORMAP, SMOKE_COLORMAP } from "./lib/colormap.ts";
 import { FrameStore } from "./lib/frames.ts";
@@ -89,12 +89,15 @@ map.on("error", (e) => {
   console.warn("map error:", e.error?.message ?? e);
 });
 
+// The spliced timeline's length isn't known until the stores are open (it
+// depends how far apart the two runs' inits are), so start at the 48 h maximum
+// and narrow it in the "opened" handler.
 const timeline = new Timeline({ maxHours: 48 });
 
 const worker = new Worker(new URL("./worker/dataWorker.ts", import.meta.url), { type: "module" });
 worker.postMessage({
   type: "open",
-  storeUrl: STORE_URL,
+  storeUrls: MAP_STORE_URLS,
   layerIds: LAYERS.map((l) => l.id),
   downsample,
   canvasWidth,
@@ -242,6 +245,10 @@ function updateTimeUI(): void {
  * Request the point series once per location, then keep the readout in step
  * with the timeline. The series covers every lead in one read, so this is a
  * single fetch rather than per-lead sampling.
+ *
+ * A non-null `initTime` stands for "the stores are open": the worker picks the
+ * point store's init itself and answers in the map's forecast hours, so there
+ * is nothing about the run for this side to pass along.
  */
 function requestSeriesIfNeeded(): void {
   if (!sampleCell || initTime === null || !firstPassDone) return;
@@ -253,7 +260,6 @@ function requestSeriesIfNeeded(): void {
     requestId: sampleRequestId,
     col: sampleCell.col,
     row: sampleCell.row,
-    initTimeMs: initTime.getTime(),
   } satisfies MainToWorker);
 }
 
@@ -343,6 +349,7 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
         corners: msg.corners,
       };
       const maxHours = msg.leadHours[msg.leadHours.length - 1] ?? 48;
+      timeline.setMaxHours(maxHours);
       ui.setMaxHours(maxHours);
       ui.setInit(initTime);
       ui.setStatus("Loading frames…", false);
