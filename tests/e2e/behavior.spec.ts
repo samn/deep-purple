@@ -166,3 +166,55 @@ test.describe("long-open tab", () => {
     await Promise.all([page.waitForEvent("load"), notice.getByRole("button", { name: "Update" }).click()]);
   });
 });
+
+test.describe("accessibility", () => {
+  test.beforeEach(async ({ context, page }) => {
+    await routeFixtures(context);
+    await gotoApp(page);
+    await waitForLoaded(page);
+  });
+
+  test("the scrubber announces the forecast time, and both labels agree on it", async ({ page }) => {
+    const slider = page.locator(".scrubber");
+    // Past the half hour: the clock must round like "+Nh" does, not truncate.
+    await slider.fill("5.6");
+    await expect(page.locator(".rel-label")).toHaveText("+6h");
+    const expected = new Intl.DateTimeFormat("en-US", {
+      weekday: "short",
+      hour: "numeric",
+      timeZone: "America/Denver",
+    }).format(new Date(fixtureManifest.initTimeMs + 6 * 3_600_000));
+    const clock = (await page.locator(".time-label").textContent())!;
+    expect(clock.replace(",", "")).toBe(expected.replace(",", ""));
+    await expect(slider).toHaveAttribute("aria-valuetext", `${clock}, 6 hours ahead`);
+  });
+
+  test("status messages are announced", async ({ page }) => {
+    await expect(page.locator(".status")).toHaveAttribute("role", "status");
+  });
+
+  test("says why locate did nothing when permission is off", async ({ page }) => {
+    await page.locator(".locate-btn").click();
+    await expect(page.locator(".status.status-visible")).toHaveText("Location permission is off for this site.");
+    // It passes, rather than sitting over the map.
+    await expect(page.locator(".status.status-visible")).toHaveCount(0, { timeout: 8000 });
+  });
+});
+
+test.describe("locating outside the forecast area", () => {
+  test.use({ geolocation: { longitude: -0.12, latitude: 51.5 }, permissions: ["geolocation"] });
+
+  test("says so, and leaves the map where it was", async ({ context, page }) => {
+    await routeFixtures(context);
+    await gotoApp(page);
+    await waitForLoaded(page);
+    await page.locator(".locate-btn").click();
+    await expect(page.locator(".status.status-visible")).toHaveText(
+      "Your location is outside the HRRR forecast area.",
+    );
+    const center = await page.evaluate(() =>
+      (window as unknown as { __map: { getCenter(): { lng: number } } }).__map.getCenter(),
+    );
+    expect(center.lng).toBeCloseTo(-97.5, 0);
+  });
+});

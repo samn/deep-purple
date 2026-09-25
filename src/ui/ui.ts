@@ -59,6 +59,10 @@ export class AppUI {
   private readonly statusEl: HTMLElement;
   private readonly titleBox: HTMLElement;
   private updateNotice: HTMLElement | null = null;
+  /** What setStatus last asked for; a flash message shows over it for a while. */
+  private status: { message: string; isError: boolean } | null = null;
+  private flashTimer: ReturnType<typeof setTimeout> | null = null;
+  private sliderText = "";
   private initDate: Date | null = null;
   private readonly readout: HTMLElement;
   private readonly readoutTemp: HTMLElement;
@@ -177,6 +181,8 @@ export class AppUI {
     this.progressBar = el("div", "progress-bar", this.progressWrap);
 
     this.statusEl = el("div", "status", root);
+    // Announced politely: loading, errors, and why locate did nothing.
+    this.statusEl.setAttribute("role", "status");
     this.setStatus("Loading forecast…", false);
 
     this.trackBarHeight(bottom);
@@ -296,12 +302,26 @@ export class AppUI {
     this.updateNotice = notice;
   }
 
-  setTime(validDate: Date, t: number, playing: boolean): void {
+  /**
+   * Show timeline hour `t` of the forecast from `initDate`. The clock and the
+   * "+Nh" label both name the nearest whole hour: truncating one and rounding
+   * the other would have them disagree for half of every hour.
+   */
+  setTime(initDate: Date, t: number, playing: boolean): void {
+    const hour = Math.round(t);
+    const valid = new Date(initDate.getTime() + hour * 3_600_000);
     const fmt = new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric" });
-    this.timeLabel.textContent = fmt.format(validDate);
-    this.relLabel.textContent = `+${Math.round(t)}h`;
+    const clock = fmt.format(valid);
+    this.timeLabel.textContent = clock;
+    this.relLabel.textContent = `+${hour}h`;
     if (document.activeElement !== this.slider || playing) {
       this.slider.value = String(t);
+    }
+    // Screen readers would otherwise announce the raw value, e.g. "30.4".
+    const text = `${clock}, ${hour} ${hour === 1 ? "hour" : "hours"} ahead`;
+    if (text !== this.sliderText) {
+      this.sliderText = text;
+      this.slider.setAttribute("aria-valuetext", text);
     }
     // Only on a change: this runs every animation frame, and replacing the
     // button's contents between press and release swallows the click (WebKit
@@ -345,12 +365,30 @@ export class AppUI {
   }
 
   setStatus(message: string | null, isError: boolean): void {
-    if (message === null) {
+    this.status = message === null ? null : { message, isError };
+    if (this.flashTimer === null) this.renderStatus(this.status);
+  }
+
+  /**
+   * Show a passing message (e.g. why locate did nothing) for a few seconds,
+   * then go back to whatever status was showing.
+   */
+  flashStatus(message: string, durationMs = 4000): void {
+    if (this.flashTimer !== null) clearTimeout(this.flashTimer);
+    this.renderStatus({ message, isError: false });
+    this.flashTimer = setTimeout(() => {
+      this.flashTimer = null;
+      this.renderStatus(this.status);
+    }, durationMs);
+  }
+
+  private renderStatus(status: { message: string; isError: boolean } | null): void {
+    if (status === null) {
       this.statusEl.classList.remove("status-visible", "status-error");
       return;
     }
-    this.statusEl.textContent = message;
+    this.statusEl.textContent = status.message;
     this.statusEl.classList.add("status-visible");
-    this.statusEl.classList.toggle("status-error", isError);
+    this.statusEl.classList.toggle("status-error", status.isError);
   }
 }

@@ -256,8 +256,7 @@ function requestPaint(): void {
 
 function updateTimeUI(): void {
   if (!initTime) return;
-  const valid = new Date(initTime.getTime() + timeline.t * 3_600_000);
-  ui.setTime(valid, timeline.t, timeline.playing);
+  ui.setTime(initTime, timeline.t, timeline.playing);
 }
 
 function refreshReadout(): void {
@@ -403,22 +402,39 @@ function showLocationDot(lon: number, lat: number): void {
   locationMarker.setLngLat([lon, lat]).addTo(map);
 }
 
-function requestLocation(fly: boolean): void {
-  if (!("geolocation" in navigator)) return;
+/**
+ * Find the user and centre on them. `userAsked` is a tap on the locate button
+ * (fly there, and say why if nothing can happen) rather than the quiet
+ * attempt at startup.
+ */
+function requestLocation(userAsked: boolean): void {
+  if (!("geolocation" in navigator)) {
+    if (userAsked) ui.flashStatus("Location isn't available in this browser.");
+    return;
+  }
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       const { longitude, latitude } = pos.coords;
-      if (!inHrrrDomain(longitude, latitude)) return;
+      if (!inHrrrDomain(longitude, latitude)) {
+        if (userAsked) ui.flashStatus("Your location is outside the HRRR forecast area.");
+        return;
+      }
       showLocationDot(longitude, latitude);
       setSampleLocation(longitude, latitude);
-      if (fly) {
+      if (userAsked) {
         map.flyTo({ center: [longitude, latitude], zoom: LOCATED_ZOOM, duration: 1200 });
       } else {
         map.jumpTo({ center: [longitude, latitude], zoom: LOCATED_ZOOM });
       }
     },
-    () => {
-      // Denied or unavailable: stay on the CONUS overview.
+    (err) => {
+      // Stay on the CONUS overview; at startup, silently.
+      if (!userAsked) return;
+      ui.flashStatus(
+        err.code === err.PERMISSION_DENIED
+          ? "Location permission is off for this site."
+          : "Couldn't find your location.",
+      );
     },
     { enableHighAccuracy: false, timeout: 6000, maximumAge: 600_000 },
   );
