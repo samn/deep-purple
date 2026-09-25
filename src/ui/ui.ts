@@ -4,6 +4,7 @@
  */
 import type { LayerConfig } from "../config.ts";
 import type { Colormap } from "../lib/colormap.ts";
+import type { ReadoutState } from "../lib/readoutSampler.ts";
 import {
   formatRange,
   formatTemperature,
@@ -11,16 +12,6 @@ import {
   saveUnitSystem,
   type UnitSystem,
 } from "../lib/units.ts";
-
-/**
- * What the readout should show. `loading` keeps the labels and stands a
- * placeholder where each value will land, so the row doesn't jump when the
- * numbers arrive; `hidden` is for no location at all.
- */
-export type ReadoutState =
-  | { kind: "hidden" }
-  | { kind: "loading" }
-  | { kind: "value"; temperatureC: number; dewpointC: number };
 
 export interface UICallbacks {
   onScrub(t: number): void;
