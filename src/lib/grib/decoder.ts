@@ -163,7 +163,10 @@ function parseGrid(s3: Uint8Array): { grid: GribGrid | null; numGridPoints: numb
   };
 }
 
-/** MSB-first bit reader. */
+/**
+ * MSB-first bit reader. Reading past the end throws: a section 7 shorter than
+ * its section 5 parameters imply would otherwise decode as a field of zeros.
+ */
 class BitReader {
   private byte = 0;
   private bit = 0;
@@ -176,6 +179,9 @@ class BitReader {
     let result = 0;
     let remaining = nbits;
     while (remaining > 0) {
+      if (this.byte >= this.buf.length) {
+        throw new GribDecodeError("Packed data ends before all values are read");
+      }
       const avail = 8 - this.bit;
       const take = remaining < avail ? remaining : avail;
       const shift = avail - take;
@@ -385,12 +391,22 @@ export function decodeGrib2Message(bytes: Uint8Array): DecodedGrib {
   const bitmapIndicator = secs.s6 ? secs.s6[5]! : 255;
   if (bitmapIndicator === 0) {
     const bitmap = secs.s6!.subarray(6);
+    if (bitmap.length * 8 < totalPoints) {
+      throw new GribDecodeError(`Bitmap covers ${bitmap.length * 8} points, grid has ${totalPoints}`);
+    }
     let k = 0;
     for (let i = 0; i < totalPoints; i++) {
       const present = (bitmap[i >> 3]! >> (7 - (i & 7))) & 1;
       values[i] = present ? (reference + ifld[k++]! * bscale) / dscale : NaN;
     }
+    // Reading past ifld yields NaN silently, so check the counts agree.
+    if (k !== ifld.length) {
+      throw new GribDecodeError(`Bitmap marks ${k} points present, ${ifld.length} are packed`);
+    }
   } else if (bitmapIndicator === 255) {
+    if (ifld.length < totalPoints) {
+      throw new GribDecodeError(`${ifld.length} points packed, grid has ${totalPoints}`);
+    }
     for (let i = 0; i < totalPoints; i++) {
       values[i] = (reference + ifld[i]! * bscale) / dscale;
     }

@@ -92,3 +92,13 @@ export function spliceRuns(runs: ForecastRun[]): SplicedTimeline {
 
   return { initTimeMs, leadHours, sources };
 }
+
+/**
+ * Whether `fresh` improves on `current`: a later start means a newer hourly
+ * run, a later end a newer six-hourly one. A timeline that merely differs —
+ * say because a store has since gone unreachable — does not count.
+ */
+export function isNewerTimeline(current: SplicedTimeline, fresh: SplicedTimeline): boolean {
+  const end = (t: SplicedTimeline) => t.initTimeMs + (t.leadHours[t.leadHours.length - 1] ?? 0) * HOUR_MS;
+  return fresh.initTimeMs > current.initTimeMs || end(fresh) > end(current);
+}

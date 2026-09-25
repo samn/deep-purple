@@ -123,7 +123,21 @@ export const READOUT_MAX_ATTEMPTS = 2;
 /** Wait before retrying a failed point read, so a retry isn't spent instantly. */
 export const READOUT_RETRY_DELAY_MS = 2000;
 
+/**
+ * How often an open, visible tab looks for a newer forecast run. HRRR's
+ * hourly run lands roughly every hour, so this keeps an unattended tab at
+ * most about one run behind without re-reading store metadata constantly.
+ */
+export const UPDATE_CHECK_INTERVAL_MS = 15 * 60_000;
+
 export const BASEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
 
 /** Progressive loading passes: hour strides, coarse first. */
 export const LOAD_PASSES = [6, 3, 1];
+
+/**
+ * Per-frame read limits. Six loads share the connection, so a ~1 MB frame on
+ * a slow mobile link can legitimately take 15–20 s; the timeout is only there
+ * to free a slot held by a request that will never finish.
+ */
+export const FRAME_LOAD_RETRY = { attempts: 3, timeoutMs: 60_000, backoffMs: 1000 };

@@ -12,11 +12,12 @@ import {
   READOUT_MAX_ATTEMPTS,
   READOUT_RETRY_DELAY_MS,
   SMOKE_LAYER,
+  UPDATE_CHECK_INTERVAL_MS,
 } from "./config.ts";
 import { makeLut, PRECIP_COLORMAP, SMOKE_COLORMAP } from "./lib/colormap.ts";
 import { FrameStore } from "./lib/frames.ts";
 import { HRRR_GRID, makeGridTransform } from "./lib/lcc.ts";
-import { PointSeries } from "./lib/pointSeries.ts";
+import { ReadoutSampler } from "./lib/readoutSampler.ts";
 import { Timeline } from "./lib/timeline.ts";
 import { GpuForecastLayer, gpuRendererSupported } from "./render/gpuLayer.ts";
 import { ForecastLayer, type OverlayPlacement } from "./render/layer.ts";
@@ -114,6 +115,8 @@ map.on("error", (e) => {
 const timeline = new Timeline({ maxHours: 48 });
 
 const worker = new Worker(new URL("./worker/dataWorker.ts", import.meta.url), { type: "module" });
+// Test hook: lets e2e specs deliver worker replies the fixtures can't produce.
+(window as unknown as { __worker: Worker }).__worker = worker;
 worker.postMessage({
   type: "open",
   storeUrls: MAP_STORE_URLS,
@@ -125,23 +128,20 @@ worker.postMessage({
 
 let frameStore: FrameStore | null = null;
 let initTime: Date | null = null;
-let pointSeries: PointSeries | null = null;
 /**
- * Grid cell being read for the readout, plus a monotonic id so replies for a
- * superseded location are ignored (and its in-flight read aborted).
+ * The point readout. Its reads wait for the first (coarse) frame pass — the
+ * same point at which the animation becomes playable — so the readout can
+ * never delay the map appearing. The worker picks the point store's init
+ * itself and answers in the map's forecast hours, so a read needs only the
+ * cell.
  */
-let sampleCell: { col: number; row: number } | null = null;
-let sampleRequestId = 0;
-type SampleState = "idle" | "loading" | "loaded" | "failed" | "gaveUp";
-let sampleState: SampleState = "idle";
-let sampleAttempts = 0;
-/**
- * The map's frames come first: the overlay is what the user is looking at, and
- * it shares the worker and the connection with the point read. Sampling waits
- * for the first (coarse) frame pass — the same point at which the animation
- * becomes playable — so the readout can never delay the map appearing.
- */
-let firstPassDone = false;
+const sampler = new ReadoutSampler({
+  maxAttempts: READOUT_MAX_ATTEMPTS,
+  retryDelayMs: READOUT_RETRY_DELAY_MS,
+  request: (requestId, cell) =>
+    worker.postMessage({ type: "sample", requestId, col: cell.col, row: cell.row } satisfies MainToWorker),
+  onChange: () => refreshReadout(),
+});
 const forecastLayers = new Map<string, ForecastLayer>();
 // GPU layers exist from startup so frames arriving before the basemap loads
 // are kept; they attach to the map in maybeAddLayers().
@@ -256,44 +256,11 @@ function requestPaint(): void {
 
 function updateTimeUI(): void {
   if (!initTime) return;
-  const valid = new Date(initTime.getTime() + timeline.t * 3_600_000);
-  ui.setTime(valid, timeline.t, timeline.playing);
+  ui.setTime(initTime, timeline.t, timeline.playing);
 }
 
-/**
- * Request the point series once per location, then keep the readout in step
- * with the timeline. The series covers every lead in one read, so this is a
- * single fetch rather than per-lead sampling.
- *
- * A non-null `initTime` stands for "the stores are open": the worker picks the
- * point store's init itself and answers in the map's forecast hours, so there
- * is nothing about the run for this side to pass along.
- */
-function requestSeriesIfNeeded(): void {
-  if (!sampleCell || initTime === null || !firstPassDone) return;
-  if (sampleState === "loading" || sampleState === "loaded" || sampleState === "gaveUp") return;
-  sampleState = "loading";
-  sampleAttempts++;
-  worker.postMessage({
-    type: "sample",
-    requestId: sampleRequestId,
-    col: sampleCell.col,
-    row: sampleCell.row,
-  } satisfies MainToWorker);
-}
-
-/**
- * Repaint the readout for the current time. Shows a loading placeholder from
- * the moment there is a location — including while the read is queued behind
- * the map's first frame pass — so the row reserves its space and the user can
- * see the values are coming.
- */
 function refreshReadout(): void {
-  requestSeriesIfNeeded();
-  const reading = sampleCell && pointSeries ? pointSeries.reading(timeline.t) : null;
-  if (reading) ui.setReadout({ kind: "value", ...reading });
-  else if (sampleCell && sampleState !== "gaveUp") ui.setReadout({ kind: "loading" });
-  else ui.setReadout({ kind: "hidden" });
+  ui.setReadout(sampler.readoutAt(timeline.t));
 }
 
 const gridTransform = makeGridTransform(HRRR_GRID);
@@ -303,43 +270,13 @@ const gridTransform = makeGridTransform(HRRR_GRID);
  * points that fall outside the LCC grid — `inHrrrDomain` is a generous lon/lat
  * box, so a fix near its corners (Bermuda, Baja) can sit off-grid, and
  * clamping would silently report the weather hundreds of km away.
- *
- * Cached readings are kept when the fix resolves to the same cell: a repeat
- * "locate" tap usually returns the same position, and re-sampling would cost
- * megabytes per lead for identical values.
  */
 function setSampleLocation(lon: number, lat: number): void {
   const [colF, rowF] = gridTransform.lonLatToGrid(lon, lat);
   const col = Math.round(colF);
   const row = Math.round(rowF);
-  if (col < 0 || col >= HRRR_GRID.nx || row < 0 || row >= HRRR_GRID.ny) {
-    // Bump the id too: a reply still in flight for the previous cell must not
-    // land in the readout after we have decided this location has no data.
-    sampleCell = null;
-    sampleRequestId++;
-    sampleState = "idle";
-    sampleAttempts = 0;
-    pointSeries?.clear();
-    ui.setReadout({ kind: "hidden" });
-    return;
-  }
-  if (sampleCell && sampleCell.col === col && sampleCell.row === row) {
-    // Same cell: keep the series we already paid for. A fresh fix is also the
-    // natural moment to retry a read we had given up on — otherwise tapping
-    // locate can never bring the readout back, since geolocation returns the
-    // same cached position and nothing else resets the state.
-    if (sampleState === "gaveUp" || sampleState === "failed") {
-      sampleState = "idle";
-      sampleAttempts = 0;
-    }
-    refreshReadout();
-    return;
-  }
-  sampleCell = { col, row };
-  sampleRequestId++;
-  sampleState = "idle";
-  sampleAttempts = 0;
-  pointSeries?.clear();
+  const onGrid = col >= 0 && col < HRRR_GRID.nx && row >= 0 && row < HRRR_GRID.ny;
+  sampler.setCell(onGrid ? { col, row } : null);
   refreshReadout();
 }
 
@@ -359,9 +296,6 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
         msg.leadHours,
       );
       frameStore.onFrame(renderFrames);
-      // Lead hours come from the point store with the series itself, since it is
-      // a separate dataset from the map's.
-      pointSeries = new PointSeries();
       placement = {
         width: msg.indexWidth,
         height: msg.indexHeight,
@@ -373,15 +307,12 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
       ui.setInit(initTime);
       ui.setStatus("Loading frames…", false);
       updateTimeUI();
-      // A location fix may already have arrived; kick off sampling for it now
-      // that the store (and lead grid) are known.
-      refreshReadout();
       maybeAddLayers();
       worker.postMessage({ type: "loadAll" } satisfies MainToWorker);
       break;
     }
     case "frameLoaded": {
-      if (msg.data) gpuLayers.get(msg.layerId)?.setFrame(msg.leadIndex, msg.data);
+      if (msg.packed) gpuLayers.get(msg.layerId)?.setFrame(msg.leadIndex, msg.packed);
       frameStore?.markLoaded(msg.layerId, msg.leadIndex);
       break;
     }
@@ -401,11 +332,8 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
     }
     case "progress": {
       ui.setProgress(msg.loaded, msg.total);
-      if (msg.firstPassDone && !firstPassDone) {
-        // Map is playable: the point read may now go ahead.
-        firstPassDone = true;
-        refreshReadout();
-      }
+      // Map is playable: the point read may now go ahead.
+      if (msg.firstPassDone) sampler.setReady();
       if (msg.firstPassDone && !started) {
         started = true;
         ui.setStatus(null, false);
@@ -415,26 +343,19 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
       break;
     }
     case "sampleSeries": {
-      // Drop a series read for a location the user has since moved away from.
-      if (msg.requestId !== sampleRequestId || !pointSeries) break;
-      sampleState = "loaded";
-      pointSeries.setSeries(msg.leadHours, msg.temperatureC, msg.dewpointC);
-      refreshReadout();
+      sampler.onSeries(msg.requestId, msg.leadHours, msg.temperatureC, msg.dewpointC);
       break;
     }
     case "sampleFailed": {
-      if (msg.requestId !== sampleRequestId) break;
-      // Retryable failures get another go on the next timeline move, bounded by
-      // READOUT_MAX_ATTEMPTS; past that (or when a retry cannot help) the
-      // placeholder is dropped rather than left spinning forever.
-      const spent = !msg.retryable || sampleAttempts >= READOUT_MAX_ATTEMPTS;
-      sampleState = spent ? "gaveUp" : "failed";
       console.warn(`point readout unavailable: ${msg.message}`);
-      // Back off before retrying. refreshReadout runs on every timeline tick,
-      // so retrying from there would spend the whole budget within a frame or
-      // two of the first failure — no use against a transient error.
-      if (!spent) setTimeout(refreshReadout, READOUT_RETRY_DELAY_MS);
-      refreshReadout();
+      sampler.onFailed(msg.requestId, msg.retryable);
+      break;
+    }
+    case "latest": {
+      if (msg.newer && !updateOffered) {
+        updateOffered = true;
+        ui.showUpdateAvailable(() => location.reload());
+      }
       break;
     }
     case "frameError": {
@@ -452,6 +373,23 @@ worker.onerror = (e) => {
   ui.setStatus(`Could not load forecast data: ${e.message ?? "worker error"}`, true);
 };
 
+/**
+ * Keep a long-open tab honest: move the "now" tick as time passes, and look
+ * for a newer run whenever the tab is visible and the last look is stale —
+ * including the moment it comes back to the foreground.
+ */
+let lastUpdateCheck = Date.now();
+let updateOffered = false;
+function checkForUpdate(): void {
+  ui.updateNowTick();
+  if (document.visibilityState !== "visible" || initTime === null || updateOffered) return;
+  if (Date.now() - lastUpdateCheck < UPDATE_CHECK_INTERVAL_MS) return;
+  lastUpdateCheck = Date.now();
+  worker.postMessage({ type: "checkLatest" } satisfies MainToWorker);
+}
+document.addEventListener("visibilitychange", checkForUpdate);
+setInterval(checkForUpdate, 60_000);
+
 let locationMarker: maplibregl.Marker | null = null;
 
 function showLocationDot(lon: number, lat: number): void {
@@ -464,22 +402,39 @@ function showLocationDot(lon: number, lat: number): void {
   locationMarker.setLngLat([lon, lat]).addTo(map);
 }
 
-function requestLocation(fly: boolean): void {
-  if (!("geolocation" in navigator)) return;
+/**
+ * Find the user and centre on them. `userAsked` is a tap on the locate button
+ * (fly there, and say why if nothing can happen) rather than the quiet
+ * attempt at startup.
+ */
+function requestLocation(userAsked: boolean): void {
+  if (!("geolocation" in navigator)) {
+    if (userAsked) ui.flashStatus("Location isn't available in this browser.");
+    return;
+  }
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       const { longitude, latitude } = pos.coords;
-      if (!inHrrrDomain(longitude, latitude)) return;
+      if (!inHrrrDomain(longitude, latitude)) {
+        if (userAsked) ui.flashStatus("Your location is outside the HRRR forecast area.");
+        return;
+      }
       showLocationDot(longitude, latitude);
       setSampleLocation(longitude, latitude);
-      if (fly) {
+      if (userAsked) {
         map.flyTo({ center: [longitude, latitude], zoom: LOCATED_ZOOM, duration: 1200 });
       } else {
         map.jumpTo({ center: [longitude, latitude], zoom: LOCATED_ZOOM });
       }
     },
-    () => {
-      // Denied or unavailable: stay on the CONUS overview.
+    (err) => {
+      // Stay on the CONUS overview; at startup, silently.
+      if (!userAsked) return;
+      ui.flashStatus(
+        err.code === err.PERMISSION_DENIED
+          ? "Location permission is off for this site."
+          : "Couldn't find your location.",
+      );
     },
     { enableHighAccuracy: false, timeout: 6000, maximumAge: 600_000 },
   );

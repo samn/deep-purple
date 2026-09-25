@@ -4,6 +4,7 @@
  */
 import type { LayerConfig } from "../config.ts";
 import type { Colormap } from "../lib/colormap.ts";
+import type { ReadoutState } from "../lib/readoutSampler.ts";
 import {
   formatRange,
   formatTemperature,
@@ -11,16 +12,6 @@ import {
   saveUnitSystem,
   type UnitSystem,
 } from "../lib/units.ts";
-
-/**
- * What the readout should show. `loading` keeps the labels and stands a
- * placeholder where each value will land, so the row doesn't jump when the
- * numbers arrive; `hidden` is for no location at all.
- */
-export type ReadoutState =
-  | { kind: "hidden" }
-  | { kind: "loading" }
-  | { kind: "value"; temperatureC: number; dewpointC: number };
 
 export interface UICallbacks {
   onScrub(t: number): void;
@@ -66,6 +57,13 @@ export class AppUI {
   private readonly progressBar: HTMLElement;
   private readonly progressWrap: HTMLElement;
   private readonly statusEl: HTMLElement;
+  private readonly titleBox: HTMLElement;
+  private updateNotice: HTMLElement | null = null;
+  /** What setStatus last asked for; a flash message shows over it for a while. */
+  private status: { message: string; isError: boolean } | null = null;
+  private flashTimer: ReturnType<typeof setTimeout> | null = null;
+  private sliderText = "";
+  private initDate: Date | null = null;
   private readonly readout: HTMLElement;
   private readonly readoutTemp: HTMLElement;
   private readonly readoutDew: HTMLElement;
@@ -75,6 +73,8 @@ export class AppUI {
   private readonly layers: { config: LayerConfig; colormap: Colormap }[];
   private readonly axisTicks: HTMLElement[] = [];
   private maxHours = 48;
+  /** Play state the button currently shows. */
+  private shownPlaying = false;
   private units: UnitSystem = loadUnitSystem();
   /** Last state, kept so a unit switch can re-render without new data. */
   private readoutState: ReadoutState = { kind: "hidden" };
@@ -88,6 +88,7 @@ export class AppUI {
 
     const top = el("div", "top-bar", root);
     const titleBox = el("div", "title-box", top);
+    this.titleBox = titleBox;
     el("h1", "app-title", titleBox).textContent = "Smoke & Rain";
     this.initLabel = el("div", "init-label", titleBox);
     this.initLabel.textContent = "Loading forecast…";
@@ -180,6 +181,8 @@ export class AppUI {
     this.progressBar = el("div", "progress-bar", this.progressWrap);
 
     this.statusEl = el("div", "status", root);
+    // Announced politely: loading, errors, and why locate did nothing.
+    this.statusEl.setAttribute("role", "status");
     this.setStatus("Loading forecast…", false);
 
     this.trackBarHeight(bottom);
@@ -247,6 +250,7 @@ export class AppUI {
     this.maxHours = h;
     this.slider.max = String(h);
     this.labelAxis();
+    this.updateNowTick();
   }
 
   private labelAxis(): void {
@@ -264,23 +268,69 @@ export class AppUI {
       day: "numeric",
     });
     this.initLabel.textContent = `HRRR forecast from ${fmt.format(initDate)}`;
-    // Position the "now" tick on the timeline if it falls inside the window.
-    const nowHours = (Date.now() - initDate.getTime()) / 3_600_000;
-    if (nowHours >= 0 && nowHours <= this.maxHours) {
-      this.nowTick.style.display = "block";
-      this.nowTick.style.left = `${(nowHours / this.maxHours) * 100}%`;
-    }
+    this.initDate = initDate;
+    this.updateNowTick();
   }
 
-  setTime(validDate: Date, t: number, playing: boolean): void {
+  /**
+   * Place the "now" tick on the timeline, or hide it once now has left the
+   * forecast window. Called again as time passes, so a long-open tab's tick
+   * keeps up with the clock.
+   */
+  updateNowTick(): void {
+    if (!this.initDate) return;
+    const nowHours = (Date.now() - this.initDate.getTime()) / 3_600_000;
+    const inside = nowHours >= 0 && nowHours <= this.maxHours;
+    this.nowTick.style.display = inside ? "block" : "none";
+    if (inside) this.nowTick.style.left = `${(nowHours / this.maxHours) * 100}%`;
+  }
+
+  /**
+   * Offer a newer forecast run, under the init label it supersedes. An offer,
+   * not an automatic switch: loading one is tens of megabytes, and the user
+   * may be mid-scrub.
+   */
+  showUpdateAvailable(onUpdate: () => void): void {
+    if (this.updateNotice) return;
+    const notice = el("div", "update-notice", this.titleBox);
+    notice.setAttribute("role", "status");
+    el("span", "update-text", notice).textContent = "Newer forecast available";
+    const btn = el("button", "update-btn", notice);
+    btn.type = "button";
+    btn.textContent = "Update";
+    btn.addEventListener("click", onUpdate);
+    this.updateNotice = notice;
+  }
+
+  /**
+   * Show timeline hour `t` of the forecast from `initDate`. The clock and the
+   * "+Nh" label both name the nearest whole hour: truncating one and rounding
+   * the other would have them disagree for half of every hour.
+   */
+  setTime(initDate: Date, t: number, playing: boolean): void {
+    const hour = Math.round(t);
+    const valid = new Date(initDate.getTime() + hour * 3_600_000);
     const fmt = new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric" });
-    this.timeLabel.textContent = fmt.format(validDate);
-    this.relLabel.textContent = `+${Math.round(t)}h`;
+    const clock = fmt.format(valid);
+    this.timeLabel.textContent = clock;
+    this.relLabel.textContent = `+${hour}h`;
     if (document.activeElement !== this.slider || playing) {
       this.slider.value = String(t);
     }
-    this.playBtn.innerHTML = playing ? PAUSE_ICON : PLAY_ICON;
-    this.playBtn.setAttribute("aria-label", playing ? "Pause animation" : "Play animation");
+    // Screen readers would otherwise announce the raw value, e.g. "30.4".
+    const text = `${clock}, ${hour} ${hour === 1 ? "hour" : "hours"} ahead`;
+    if (text !== this.sliderText) {
+      this.sliderText = text;
+      this.slider.setAttribute("aria-valuetext", text);
+    }
+    // Only on a change: this runs every animation frame, and replacing the
+    // button's contents between press and release swallows the click (WebKit
+    // drops it when the pressed text node is gone), so pause could miss.
+    if (playing !== this.shownPlaying) {
+      this.shownPlaying = playing;
+      this.playBtn.innerHTML = playing ? PAUSE_ICON : PLAY_ICON;
+      this.playBtn.setAttribute("aria-label", playing ? "Pause animation" : "Play animation");
+    }
   }
 
   /** Show, hide, or show a loading placeholder for the located-point readout. */
@@ -315,12 +365,35 @@ export class AppUI {
   }
 
   setStatus(message: string | null, isError: boolean): void {
-    if (message === null) {
+    this.status = message === null ? null : { message, isError };
+    // An error outranks a passing message: cut the flash short for it.
+    if (isError && this.flashTimer !== null) {
+      clearTimeout(this.flashTimer);
+      this.flashTimer = null;
+    }
+    if (this.flashTimer === null) this.renderStatus(this.status);
+  }
+
+  /**
+   * Show a passing message (e.g. why locate did nothing) for a few seconds,
+   * then go back to whatever status was showing.
+   */
+  flashStatus(message: string, durationMs = 4000): void {
+    if (this.flashTimer !== null) clearTimeout(this.flashTimer);
+    this.renderStatus({ message, isError: false });
+    this.flashTimer = setTimeout(() => {
+      this.flashTimer = null;
+      this.renderStatus(this.status);
+    }, durationMs);
+  }
+
+  private renderStatus(status: { message: string; isError: boolean } | null): void {
+    if (status === null) {
       this.statusEl.classList.remove("status-visible", "status-error");
       return;
     }
-    this.statusEl.textContent = message;
+    this.statusEl.textContent = status.message;
     this.statusEl.classList.add("status-visible");
-    this.statusEl.classList.toggle("status-error", isError);
+    this.statusEl.classList.toggle("status-error", status.isError);
   }
 }

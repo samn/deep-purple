@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { spliceRuns, type ForecastRun } from "../../src/lib/splice.ts";
+import { isNewerTimeline, spliceRuns, type ForecastRun } from "../../src/lib/splice.ts";
 
 const HOUR = 3_600_000;
 const at = (iso: string) => new Date(iso).getTime();
@@ -96,5 +96,39 @@ describe("spliceRuns", () => {
     expect(() => spliceRuns([{ initTimeMs: at("2026-08-06T12:00Z"), leadHours: [] }])).toThrow(
       /cover no common hour/,
     );
+  });
+});
+
+describe("isNewerTimeline", () => {
+  const H = 3_600_000;
+  const leads = (n: number) => Array.from({ length: n + 1 }, (_, i) => i);
+  const t0 = Date.UTC(2026, 8, 25, 12);
+  const current = spliceRuns([
+    { initTimeMs: t0 + 3 * H, leadHours: leads(18) },
+    { initTimeMs: t0, leadHours: leads(48) },
+  ]);
+
+  it("is newer when the hourly run moves on", () => {
+    const fresh = spliceRuns([
+      { initTimeMs: t0 + 4 * H, leadHours: leads(18) },
+      { initTimeMs: t0, leadHours: leads(48) },
+    ]);
+    expect(isNewerTimeline(current, fresh)).toBe(true);
+  });
+
+  it("is newer when only the six-hourly run moves on", () => {
+    const fresh = spliceRuns([
+      { initTimeMs: t0 + 3 * H, leadHours: leads(18) },
+      { initTimeMs: t0 + 6 * H, leadHours: leads(48) },
+    ]);
+    expect(isNewerTimeline(current, fresh)).toBe(true);
+  });
+
+  it("is not newer when nothing moved, or a store dropped out", () => {
+    expect(isNewerTimeline(current, current)).toBe(false);
+    const lostHourly = spliceRuns([{ initTimeMs: t0, leadHours: leads(48) }]);
+    const lostSixHourly = spliceRuns([{ initTimeMs: t0 + 3 * H, leadHours: leads(18) }]);
+    expect(isNewerTimeline(current, lostHourly)).toBe(false);
+    expect(isNewerTimeline(current, lostSixHourly)).toBe(false);
   });
 });

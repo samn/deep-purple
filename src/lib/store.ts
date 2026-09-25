@@ -2,7 +2,7 @@
  * Data access layer for the dynamical.org HRRR icechunk store, built on
  * icechunk-js + zarrita with the custom gribberish codec.
  */
-import { IcechunkStore } from "icechunk-js";
+import { HttpStorage, IcechunkStore, type Storage } from "icechunk-js";
 import * as zarr from "zarrita";
 import { registerGribberishCodec } from "./grib/codec.ts";
 
@@ -22,6 +22,30 @@ export interface HrrrDataset {
   latestInitIndex: number;
   /** Lead time offsets in hours (0..48). */
   leadTimeHours: number[];
+}
+
+/** Objects named by their content hash: a cached copy is always current. */
+const IMMUTABLE_PREFIX = /^\/?(?:snapshots|manifests|chunks|transactions)\//;
+
+/**
+ * Open a store's main branch, revalidating its mutable metadata with the
+ * server. S3 sends the repo file without Cache-Control, so a browser may
+ * otherwise reuse a cached copy heuristically and open a snapshot from hours
+ * ago — even on a reload, and even when checking for a newer run.
+ * Content-addressed objects keep the normal cache, so a reload doesn't spend
+ * a round trip revalidating each one along the repo → snapshot → manifest
+ * chain.
+ */
+function openStore(storeUrl: string): Promise<IcechunkStore> {
+  const fresh = new HttpStorage(storeUrl, { cache: "no-cache" });
+  const cached = new HttpStorage(storeUrl);
+  const pick = (path: string) => (IMMUTABLE_PREFIX.test(path) ? cached : fresh);
+  const storage: Storage = {
+    getObject: (path, range, options) => pick(path).getObject(path, range, options),
+    exists: (path, options) => pick(path).exists(path, options),
+    listPrefix: (prefix) => fresh.listPrefix(prefix),
+  };
+  return IcechunkStore.open(storage, { branch: "main" });
 }
 
 async function readNumericArray(
@@ -79,7 +103,7 @@ export async function openHrrrDataset(
   variables: VariableSpec[],
 ): Promise<HrrrDataset> {
   registerGribberishCodec();
-  const store = await IcechunkStore.open(storeUrl, { branch: "main" });
+  const store = await openStore(storeUrl);
 
   const [initTimeSecs, leadTimeSecs] = await Promise.all([
     readNumericArray(store, "/init_time"),
@@ -131,7 +155,7 @@ export async function openPointDataset(
   storeUrl: string,
   variableNames: string[],
 ): Promise<PointDataset> {
-  const store = await IcechunkStore.open(storeUrl, { branch: "main" });
+  const store = await openStore(storeUrl);
   const [initTimeSecs, leadTimeSecs] = await Promise.all([
     readNumericArray(store, "/init_time"),
     readNumericArray(store, "/lead_time"),

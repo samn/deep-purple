@@ -56,7 +56,15 @@ export interface SampleRequest {
   row: number;
 }
 
-export type MainToWorker = OpenRequest | LoadAllRequest | PaintRequest | SampleRequest;
+/**
+ * Re-open the map stores and report whether they now splice into a newer
+ * forecast than the one loaded. Leaves the loaded forecast alone.
+ */
+export interface CheckLatestRequest {
+  type: "checkLatest";
+}
+
+export type MainToWorker = OpenRequest | LoadAllRequest | PaintRequest | SampleRequest | CheckLatestRequest;
 
 export interface OpenedMessage {
   type: "opened";
@@ -78,13 +86,14 @@ export interface OpenedMessage {
 /**
  * A frame arrived and is paintable. The bytes stay in the worker unless the
  * open request set `sendFrameBytes`, in which case they are transferred here
- * (quantized values, frame ny x nx) and the worker keeps nothing.
+ * and the worker keeps nothing: quantized values, frame ny x nx, compressed
+ * with `lib/packbits.ts`.
  */
 export interface FrameLoadedMessage {
   type: "frameLoaded";
   layerId: string;
   leadIndex: number;
-  data?: Uint8Array;
+  packed?: Uint8Array;
 }
 
 export interface PaintedMessage {
@@ -144,6 +153,12 @@ export interface SampleFailedMessage {
   message: string;
 }
 
+/** Answer to `checkLatest`; not sent when the check itself fails. */
+export interface LatestMessage {
+  type: "latest";
+  newer: boolean;
+}
+
 export type WorkerToMain =
   | OpenedMessage
   | FrameLoadedMessage
@@ -152,4 +167,5 @@ export type WorkerToMain =
   | FrameErrorMessage
   | SampleSeriesMessage
   | SampleFailedMessage
+  | LatestMessage
   | FatalErrorMessage;

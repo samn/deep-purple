@@ -1,13 +1,21 @@
 /**
  * GPU forecast overlay: a MapLibre custom layer that reprojects the HRRR
  * grid, crossfades bracketing frames, and applies the palette entirely in a
- * fragment shader. Quantized frames upload once as R8 textures; per-frame
- * work on the CPU is just uniform updates and a draw call.
+ * fragment shader. Quantized frames upload once as RG8 (value + mask)
+ * textures; per-frame work on the CPU is just uniform updates and a draw call.
  *
  * The fragment shader inverts each screen pixel's mercator position through
  * the Lambert conformal projection to a fractional grid cell, so the overlay
  * resolves at screen resolution (the canvas renderer resamples a fixed
  * 1600px-wide raster instead).
+ *
+ * Bytes are log-scale intensities with 0 meaning "nothing", so neither the
+ * filtering nor the crossfade may interpolate them blindly: that would ring
+ * every rain cell with moderate rain and draw a fade-in as a band of it. Frame
+ * textures carry the value and a 0/1 "has data" mask side by side, so one
+ * filtered read gives both the weighted value and the fraction of neighbours
+ * with data; their ratio is the mean over cells that have data, and the
+ * fraction becomes opacity. The crossfade then mixes premultiplied colours.
  */
 import type {
   CustomLayerInterface,
@@ -15,6 +23,7 @@ import type {
   Map as MapLibreMap,
 } from "maplibre-gl";
 import { makeLccConstants, makeLccProjection, type LccGrid } from "../lib/lcc.ts";
+import { unpackBits } from "../lib/packbits.ts";
 import { gridMercatorBounds } from "../lib/reproject.ts";
 
 /** Matches the canvas renderer's raster-opacity. */
@@ -35,6 +44,7 @@ precision highp float;
 
 uniform sampler2D u_frame_a;
 uniform sampler2D u_frame_b;
+// 256 x 1 RGBA palette, straight alpha, indexed by quantized byte.
 uniform sampler2D u_lut;
 uniform float u_blend;
 uniform float u_opacity;
@@ -49,13 +59,23 @@ uniform vec2 u_origin;
 uniform vec2 u_cell;
 // Full-resolution grid dimensions (nx, ny).
 uniform vec2 u_grid;
-// Half-texel offset of the (possibly downsampled) frame textures.
-uniform vec2 u_half_texel;
+// Grid cells per frame texel along each axis (block-max downsampling).
+uniform float u_downsample;
 
 in vec2 v_merc;
 out vec4 fragColor;
 
 const float PI2 = 6.283185307179586;
+
+// Premultiplied colour of one frame at uv: the palette colour of the mean
+// value over the neighbouring cells that have data, weighted by how many do.
+vec4 frameColor(sampler2D frame, vec2 uv) {
+  vec2 s = texture(frame, uv).rg;
+  if (s.g == 0.0) return vec4(0.0);
+  float v = s.r / s.g;
+  vec4 c = texelFetch(u_lut, ivec2(int(v * 255.0 + 0.5), 0), 0);
+  return vec4(c.rgb * c.a, c.a) * s.g;
+}
 
 void main() {
   // Normalized mercator -> lon/lat (radians).
@@ -74,12 +94,13 @@ void main() {
     discard;
   }
 
-  // Sample at cell centers; frame textures may be downsampled relative to
-  // the grid, which the half-texel offset absorbs.
-  vec2 uv = vec2(col, row) / u_grid + u_half_texel;
-  float v = mix(texture(u_frame_a, uv).r, texture(u_frame_b, uv).r, u_blend);
-  vec4 color = texture(u_lut, vec2((v * 255.0 + 0.5) / 256.0, 0.5));
-  fragColor = vec4(color.rgb * color.a, color.a) * u_opacity;
+  // Frame texel k covers grid cells k*f .. k*f+f-1 (block-max downsampling),
+  // so grid cell centre c sits at texel coordinate (c + 0.5) / f.
+  vec2 uv = (vec2(col, row) + 0.5) / (u_downsample * vec2(textureSize(u_frame_a, 0)));
+  vec4 color = frameColor(u_frame_a, uv);
+  if (u_blend > 0.0) color = mix(color, frameColor(u_frame_b, uv), u_blend);
+  if (color.a == 0.0) discard;
+  fragColor = color * u_opacity;
 }
 `;
 
@@ -137,6 +158,7 @@ export class GpuForecastLayer implements CustomLayerInterface {
   readonly renderingMode = "2d" as const;
 
   private readonly grid: LccGrid;
+  private readonly downsample: number;
   private readonly frameNx: number;
   private readonly frameNy: number;
   private readonly lut: Uint8ClampedArray;
@@ -147,8 +169,13 @@ export class GpuForecastLayer implements CustomLayerInterface {
   private b = -1;
   private blend = 0;
 
+  /** PackBits-compressed frames; decoded only to upload a texture. */
   private readonly frames = new Map<number, Uint8Array>();
   private readonly textures = new Map<number, CachedTexture>();
+  /** Decode target for texture uploads, allocated on first use. */
+  private scratch: Uint8Array | null = null;
+  /** Value + mask pairs for the RG8 upload, allocated on first use. */
+  private scratchRg: Uint8Array | null = null;
   private tick = 0;
 
   private gl: WebGL2RenderingContext | null = null;
@@ -164,14 +191,15 @@ export class GpuForecastLayer implements CustomLayerInterface {
   constructor(id: string, grid: LccGrid, downsample: number, lut: Uint8ClampedArray) {
     this.id = id;
     this.grid = grid;
+    this.downsample = downsample;
     this.frameNx = Math.ceil(grid.nx / downsample);
     this.frameNy = Math.ceil(grid.ny / downsample);
     this.lut = lut;
   }
 
-  /** Store a loaded frame's quantized bytes; textures upload on demand. */
-  setFrame(leadIndex: number, data: Uint8Array): void {
-    this.frames.set(leadIndex, data);
+  /** Store a loaded frame's compressed bytes; textures upload on demand. */
+  setFrame(leadIndex: number, packed: Uint8Array): void {
+    this.frames.set(leadIndex, packed);
     const cached = this.textures.get(leadIndex);
     if (cached) {
       this.gl?.deleteTexture(cached.texture);
@@ -326,7 +354,7 @@ void main() {
       "u_origin",
       "u_cell",
       "u_grid",
-      "u_half_texel",
+      "u_downsample",
     ];
     for (const name of uniforms) this.locations.set(name, gl.getUniformLocation(program, name));
 
@@ -345,7 +373,7 @@ void main() {
     gl.uniform2f(this.loc("u_origin"), x1, y1);
     gl.uniform2f(this.loc("u_cell"), this.grid.dx, this.grid.dy);
     gl.uniform2f(this.loc("u_grid"), this.grid.nx, this.grid.ny);
-    gl.uniform2f(this.loc("u_half_texel"), 0.5 / this.frameNx, 0.5 / this.frameNy);
+    gl.uniform1f(this.loc("u_downsample"), this.downsample);
   }
 
   /** Subdivided quad over the grid's mercator bounding box. */
@@ -393,8 +421,8 @@ void main() {
     const texture = gl.createTexture();
     if (!texture) throw new Error("createTexture failed");
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texImage2D(
@@ -411,7 +439,7 @@ void main() {
     return texture;
   }
 
-  /** Upload (or reuse) the R8 texture for a lead index; LRU-evicts extras. */
+  /** Upload (or reuse) the RG8 texture for a lead index; LRU-evicts extras. */
   private ensureTexture(gl: WebGL2RenderingContext, leadIndex: number): WebGLTexture | null {
     this.tick++;
     const cached = this.textures.get(leadIndex);
@@ -419,8 +447,16 @@ void main() {
       cached.lastUse = this.tick;
       return cached.texture;
     }
-    const data = this.frames.get(leadIndex);
-    if (!data) return null;
+    const packed = this.frames.get(leadIndex);
+    if (!packed) return null;
+    const values = (this.scratch ??= new Uint8Array(this.frameNx * this.frameNy));
+    unpackBits(packed, values);
+    const rg = (this.scratchRg ??= new Uint8Array(values.length * 2));
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i]!;
+      rg[2 * i] = v;
+      rg[2 * i + 1] = v === 0 ? 0 : 255;
+    }
 
     const texture = gl.createTexture();
     if (!texture) return null;
@@ -431,7 +467,7 @@ void main() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, this.frameNx, this.frameNy, 0, gl.RED, gl.UNSIGNED_BYTE, data);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, this.frameNx, this.frameNy, 0, gl.RG, gl.UNSIGNED_BYTE, rg);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
     this.textures.set(leadIndex, { texture, lastUse: this.tick });
 

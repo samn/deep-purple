@@ -9,14 +9,24 @@
  * spliced timeline; which store, init and lead actually serve it is this
  * module's business and nothing outside it needs to know.
  */
-import { LAYERS, LOAD_PASSES, POINT_STORE_URL, POINT_VARIABLES, TEMPERATURE_VARIABLE, DEWPOINT_VARIABLE, type LayerConfig } from "../config.ts";
+import { FRAME_LOAD_RETRY, LAYERS, LOAD_PASSES, POINT_STORE_URL, POINT_VARIABLES, TEMPERATURE_VARIABLE, DEWPOINT_VARIABLE, type LayerConfig } from "../config.ts";
 import { makeLut, makeQuantizer, quantizeField, PRECIP_COLORMAP, SMOKE_COLORMAP, type Quantizer } from "../lib/colormap.ts";
 import { HRRR_GRID } from "../lib/lcc.ts";
+import { packBits, unpackBits } from "../lib/packbits.ts";
 import { buildIndexMap, paintFrame, type IndexMap } from "../lib/reproject.ts";
-import { spliceRuns, type FrameSource } from "../lib/splice.ts";
+import { isTransientLoadError, withRetry } from "../lib/retry.ts";
+import { isNewerTimeline, spliceRuns, type FrameSource, type SplicedTimeline } from "../lib/splice.ts";
 import { loadField, loadPointSeries, openHrrrDataset, openPointDataset, type HrrrDataset, type PointDataset } from "../lib/store.ts";
+import * as zarr from "zarrita";
 import type { MainToWorker, PaintRequest, SampleRequest, WorkerToMain } from "./protocol.ts";
 import { progressiveLeadOrder } from "./schedule.ts";
+
+// The stores' coordinate arrays (init_time, lead_time) are blosc-compressed,
+// and zarrita only imports its ~600 kB blosc codec when it first meets one:
+// after the repo, snapshot and array metadata round trips. Start that import
+// now so the download overlaps them instead of following them.
+// A failed prefetch is harmless: the real read imports it again and reports.
+void Promise.resolve(zarr.registry.get("blosc")?.()).catch(() => {});
 
 const COLORMAPS = { precip: PRECIP_COLORMAP, smoke: SMOKE_COLORMAP } as const;
 
@@ -27,7 +37,40 @@ interface LayerState {
   config: LayerConfig;
   quantizer: Quantizer;
   lut: Uint8ClampedArray;
+  /** PackBits-compressed quantized frames, per timeline hour. */
   frames: (Uint8Array | null)[];
+  /** Recently painted frames, decompressed; most recent last. */
+  decoded: Map<number, Uint8Array>;
+}
+
+/**
+ * Decompressed frames kept per layer for painting. A paint needs two; a few
+ * more cover scrubbing back and forth without decoding again.
+ */
+const DECODED_CACHE_SIZE = 4;
+
+/** The layer's frame at `leadIndex`, decompressed, or null if not loaded. */
+function frameBytes(layer: LayerState, leadIndex: number): Uint8Array | null {
+  const hit = layer.decoded.get(leadIndex);
+  if (hit) {
+    layer.decoded.delete(leadIndex);
+    layer.decoded.set(leadIndex, hit);
+    return hit;
+  }
+  const packed = layer.frames[leadIndex];
+  if (!packed) return null;
+  let out: Uint8Array;
+  if (layer.decoded.size >= DECODED_CACHE_SIZE) {
+    // Reuse the least recently painted frame's buffer.
+    const [oldest, buf] = layer.decoded.entries().next().value!;
+    layer.decoded.delete(oldest);
+    out = buf;
+  } else {
+    out = new Uint8Array(frameNy * frameNx);
+  }
+  unpackBits(packed, out);
+  layer.decoded.set(leadIndex, out);
+  return out;
 }
 
 /** The spliced stores, indexed by `FrameSource.runIndex`. */
@@ -36,6 +79,8 @@ let runs: HrrrDataset[] = [];
 let frameSources: FrameSource[] = [];
 /** Hour 0 of the spliced timeline, epoch ms. */
 let baseInitMs = 0;
+/** What was opened, so `checkLatest` can open it again and compare. */
+let opened: { storeUrls: string[]; specs: { name: string; scale: number }[]; timeline: SplicedTimeline } | null = null;
 let layers: LayerState[] = [];
 let indexMap: IndexMap | null = null;
 let downsample = 1;
@@ -78,6 +123,7 @@ async function handleOpen(storeUrls: string[], layerIds: string[], factor: numbe
       quantizer: makeQuantizer(COLORMAPS[config.id]),
       lut: makeLut(COLORMAPS[config.id]),
       frames: [],
+      decoded: new Map(),
     };
   });
   downsample = factor;
@@ -89,16 +135,10 @@ async function handleOpen(storeUrls: string[], layerIds: string[], factor: numbe
     buildIndexMap(HRRR_GRID, canvasWidth, frameNy, frameNx),
   );
 
-  const datasets = await openMapStores(
-    storeUrls,
-    layers.map((l) => ({ name: l.config.arrayName, scale: l.config.scale })),
-  );
-  const timeline = spliceRuns(
-    datasets.map((d) => ({
-      initTimeMs: d.initTimes[d.latestInitIndex]!.getTime(),
-      leadHours: d.leadTimeHours,
-    })),
-  );
+  const specs = layers.map((l) => ({ name: l.config.arrayName, scale: l.config.scale }));
+  const datasets = await openMapStores(storeUrls, specs);
+  const timeline = spliceDatasets(datasets);
+  opened = { storeUrls, specs, timeline };
   runs = datasets;
   frameSources = timeline.sources;
   baseInitMs = timeline.initTimeMs;
@@ -115,6 +155,21 @@ async function handleOpen(storeUrls: string[], layerIds: string[], factor: numbe
     indexHeight: indexMap.height,
     corners: indexMap.corners,
   });
+}
+
+function spliceDatasets(datasets: HrrrDataset[]): SplicedTimeline {
+  return spliceRuns(
+    datasets.map((d) => ({
+      initTimeMs: d.initTimes[d.latestInitIndex]!.getTime(),
+      leadHours: d.leadTimeHours,
+    })),
+  );
+}
+
+async function handleCheckLatest(): Promise<void> {
+  if (!opened) return;
+  const fresh = spliceDatasets(await openMapStores(opened.storeUrls, opened.specs));
+  post({ type: "latest", newer: isNewerTimeline(opened.timeline, fresh) });
 }
 
 async function handleLoadAll() {
@@ -140,20 +195,28 @@ async function handleLoadAll() {
       try {
         const source = frameSources[job.leadIndex]!;
         const run = runs[source.runIndex]!;
-        const { values, ny, nx } = await loadField(
-          run,
-          { name: job.layer.config.arrayName, scale: job.layer.config.scale },
-          run.latestInitIndex,
-          source.leadIndex,
+        const { values, ny, nx } = await withRetry(
+          (signal) =>
+            loadField(
+              run,
+              { name: job.layer.config.arrayName, scale: job.layer.config.scale },
+              run.latestInitIndex,
+              source.leadIndex,
+              signal,
+            ),
+          { ...FRAME_LOAD_RETRY, retryable: isTransientLoadError },
         );
         const q = quantizeField(job.layer.quantizer, values, ny, nx, downsample);
+        // Held compressed on either side: raw, 44 hours x 2 layers of 1.9 MB
+        // frames would be ~170 MB of tab memory.
+        const packed = packBits(q.data);
         if (sendFrameBytes) {
           post(
-            { type: "frameLoaded", layerId: job.layer.config.id, leadIndex: job.leadIndex, data: q.data },
-            [q.data.buffer],
+            { type: "frameLoaded", layerId: job.layer.config.id, leadIndex: job.leadIndex, packed },
+            [packed.buffer],
           );
         } else {
-          job.layer.frames[job.leadIndex] = q.data;
+          job.layer.frames[job.leadIndex] = packed;
           post({ type: "frameLoaded", layerId: job.layer.config.id, leadIndex: job.leadIndex });
         }
       } catch (e) {
@@ -190,9 +253,9 @@ function handlePaint(req: PaintRequest): void {
   try {
     for (const job of req.jobs) {
       const layer = layers.find((l) => l.config.id === job.layerId);
-      const frameA = layer?.frames[job.a];
+      const frameA = layer ? frameBytes(layer, job.a) : null;
       if (!layer || !frameA) continue;
-      const frameB = job.b !== job.a ? (layer.frames[job.b] ?? null) : null;
+      const frameB = job.b !== job.a ? frameBytes(layer, job.b) : null;
       const pixels = new Uint8ClampedArray(pool.pop() ?? new ArrayBuffer(byteLength));
       paintFrame(map, layer.lut, pixels, frameA, frameB, job.blend);
       frames.push({ layerId: job.layerId, pixels });
@@ -300,6 +363,9 @@ self.onmessage = (ev: MessageEvent<MainToWorker>) => {
     handleLoadAll().catch(fail);
   } else if (msg.type === "paint") {
     handlePaint(msg);
+  } else if (msg.type === "checkLatest") {
+    // A failed check just means no update offer this time.
+    handleCheckLatest().catch((e) => console.warn("update check failed:", e));
   } else if (msg.type === "sample") {
     // Sampling failures must never surface as a fatal store error; the map
     // and animation work fine without the readout.
