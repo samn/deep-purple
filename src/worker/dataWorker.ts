@@ -9,10 +9,11 @@
  * spliced timeline; which store, init and lead actually serve it is this
  * module's business and nothing outside it needs to know.
  */
-import { LAYERS, LOAD_PASSES, POINT_STORE_URL, POINT_VARIABLES, TEMPERATURE_VARIABLE, DEWPOINT_VARIABLE, type LayerConfig } from "../config.ts";
+import { FRAME_LOAD_RETRY, LAYERS, LOAD_PASSES, POINT_STORE_URL, POINT_VARIABLES, TEMPERATURE_VARIABLE, DEWPOINT_VARIABLE, type LayerConfig } from "../config.ts";
 import { makeLut, makeQuantizer, quantizeField, PRECIP_COLORMAP, SMOKE_COLORMAP, type Quantizer } from "../lib/colormap.ts";
 import { HRRR_GRID } from "../lib/lcc.ts";
 import { buildIndexMap, paintFrame, type IndexMap } from "../lib/reproject.ts";
+import { withRetry } from "../lib/retry.ts";
 import { spliceRuns, type FrameSource } from "../lib/splice.ts";
 import { loadField, loadPointSeries, openHrrrDataset, openPointDataset, type HrrrDataset, type PointDataset } from "../lib/store.ts";
 import type { MainToWorker, PaintRequest, SampleRequest, WorkerToMain } from "./protocol.ts";
@@ -140,11 +141,17 @@ async function handleLoadAll() {
       try {
         const source = frameSources[job.leadIndex]!;
         const run = runs[source.runIndex]!;
-        const { values, ny, nx } = await loadField(
-          run,
-          { name: job.layer.config.arrayName, scale: job.layer.config.scale },
-          run.latestInitIndex,
-          source.leadIndex,
+        const { values, ny, nx } = await withRetry(
+          (signal) =>
+            loadField(
+              run,
+              { name: job.layer.config.arrayName, scale: job.layer.config.scale },
+              run.latestInitIndex,
+              source.leadIndex,
+              signal,
+            ),
+          // Bad GRIB bytes decode the same way every time.
+          { ...FRAME_LOAD_RETRY, retryable: (e) => !(e instanceof Error && e.name === "GribDecodeError") },
         );
         const q = quantizeField(job.layer.quantizer, values, ny, nx, downsample);
         if (sendFrameBytes) {

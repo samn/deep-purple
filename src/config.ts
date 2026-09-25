@@ -127,3 +127,10 @@ export const BASEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron"
 
 /** Progressive loading passes: hour strides, coarse first. */
 export const LOAD_PASSES = [6, 3, 1];
+
+/**
+ * Per-frame read limits. Six loads share the connection, so a ~1 MB frame on
+ * a slow mobile link can legitimately take 15–20 s; the timeout is only there
+ * to free a slot held by a request that will never finish.
+ */
+export const FRAME_LOAD_RETRY = { attempts: 3, timeoutMs: 60_000, backoffMs: 1000 };
