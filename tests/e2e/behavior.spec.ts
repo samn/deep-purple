@@ -120,3 +120,49 @@ test.describe("geolocation", () => {
     });
   });
 });
+
+test.describe("long-open tab", () => {
+  test.beforeEach(async ({ context, page }) => {
+    await routeFixtures(context);
+    await gotoApp(page);
+    await waitForLoaded(page);
+  });
+
+  test("looks for a newer run when it comes back after a while, and moves the now tick", async ({ page }) => {
+    const tick = page.locator(".now-tick");
+    const before = await tick.evaluate((el) => (el as HTMLElement).style.left);
+    const reopened = page.waitForRequest((r) => r.url().endsWith(".icechunk/repo"));
+
+    // 20 minutes on, the tab returns to the foreground.
+    await page.clock.setFixedTime(new Date(fixtureManifest.initTimeMs + 2 * 3_600_000 + 20 * 60_000));
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+
+    await reopened;
+    expect(await tick.evaluate((el) => (el as HTMLElement).style.left)).not.toBe(before);
+    // The recorded stores haven't moved on, so nothing is offered.
+    await page.waitForTimeout(1000);
+    await expect(page.locator(".update-notice")).toHaveCount(0);
+  });
+
+  test("doesn't re-check right away", async ({ page }) => {
+    let reopened = false;
+    page.on("request", (r) => {
+      if (r.url().endsWith(".icechunk/repo")) reopened = true;
+    });
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await page.waitForTimeout(1000);
+    expect(reopened).toBe(false);
+  });
+
+  test("offers a newer run, and loads it on request", async ({ page }) => {
+    await page.evaluate(() => {
+      const worker = (window as unknown as { __worker: Worker }).__worker;
+      worker.onmessage?.(new MessageEvent("message", { data: { type: "latest", newer: true } }));
+    });
+    const notice = page.locator(".update-notice");
+    await expect(notice).toBeVisible();
+    await expect(notice).toHaveAttribute("role", "status");
+    await expect(notice).toContainText("Newer forecast available");
+    await Promise.all([page.waitForEvent("load"), notice.getByRole("button", { name: "Update" }).click()]);
+  });
+});

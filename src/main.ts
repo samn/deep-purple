@@ -12,6 +12,7 @@ import {
   READOUT_MAX_ATTEMPTS,
   READOUT_RETRY_DELAY_MS,
   SMOKE_LAYER,
+  UPDATE_CHECK_INTERVAL_MS,
 } from "./config.ts";
 import { makeLut, PRECIP_COLORMAP, SMOKE_COLORMAP } from "./lib/colormap.ts";
 import { FrameStore } from "./lib/frames.ts";
@@ -114,6 +115,8 @@ map.on("error", (e) => {
 const timeline = new Timeline({ maxHours: 48 });
 
 const worker = new Worker(new URL("./worker/dataWorker.ts", import.meta.url), { type: "module" });
+// Test hook: lets e2e specs deliver worker replies the fixtures can't produce.
+(window as unknown as { __worker: Worker }).__worker = worker;
 worker.postMessage({
   type: "open",
   storeUrls: MAP_STORE_URLS,
@@ -349,6 +352,13 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
       sampler.onFailed(msg.requestId, msg.retryable);
       break;
     }
+    case "latest": {
+      if (msg.newer && !updateOffered) {
+        updateOffered = true;
+        ui.showUpdateAvailable(() => location.reload());
+      }
+      break;
+    }
     case "frameError": {
       console.warn(`frame ${msg.layerId}@${msg.leadIndex} failed: ${msg.message}`);
       break;
@@ -363,6 +373,23 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
 worker.onerror = (e) => {
   ui.setStatus(`Could not load forecast data: ${e.message ?? "worker error"}`, true);
 };
+
+/**
+ * Keep a long-open tab honest: move the "now" tick as time passes, and look
+ * for a newer run whenever the tab is visible and the last look is stale —
+ * including the moment it comes back to the foreground.
+ */
+let lastUpdateCheck = Date.now();
+let updateOffered = false;
+function checkForUpdate(): void {
+  ui.updateNowTick();
+  if (document.visibilityState !== "visible" || initTime === null || updateOffered) return;
+  if (Date.now() - lastUpdateCheck < UPDATE_CHECK_INTERVAL_MS) return;
+  lastUpdateCheck = Date.now();
+  worker.postMessage({ type: "checkLatest" } satisfies MainToWorker);
+}
+document.addEventListener("visibilitychange", checkForUpdate);
+setInterval(checkForUpdate, 60_000);
 
 let locationMarker: maplibregl.Marker | null = null;
 

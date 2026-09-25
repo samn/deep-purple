@@ -2,7 +2,7 @@
  * Data access layer for the dynamical.org HRRR icechunk store, built on
  * icechunk-js + zarrita with the custom gribberish codec.
  */
-import { IcechunkStore } from "icechunk-js";
+import { HttpStorage, IcechunkStore } from "icechunk-js";
 import * as zarr from "zarrita";
 import { registerGribberishCodec } from "./grib/codec.ts";
 
@@ -22,6 +22,17 @@ export interface HrrrDataset {
   latestInitIndex: number;
   /** Lead time offsets in hours (0..48). */
   leadTimeHours: number[];
+}
+
+/**
+ * Open a store's main branch, revalidating its metadata with the server. S3
+ * sends the repo file without Cache-Control, so a browser may otherwise reuse
+ * a cached copy heuristically and open a snapshot from hours ago — even on a
+ * reload, and even when checking for a newer run. Content-addressed objects
+ * cost a 304 at most.
+ */
+function openStore(storeUrl: string): Promise<IcechunkStore> {
+  return IcechunkStore.open(new HttpStorage(storeUrl, { cache: "no-cache" }), { branch: "main" });
 }
 
 async function readNumericArray(
@@ -79,7 +90,7 @@ export async function openHrrrDataset(
   variables: VariableSpec[],
 ): Promise<HrrrDataset> {
   registerGribberishCodec();
-  const store = await IcechunkStore.open(storeUrl, { branch: "main" });
+  const store = await openStore(storeUrl);
 
   const [initTimeSecs, leadTimeSecs] = await Promise.all([
     readNumericArray(store, "/init_time"),
@@ -131,7 +142,7 @@ export async function openPointDataset(
   storeUrl: string,
   variableNames: string[],
 ): Promise<PointDataset> {
-  const store = await IcechunkStore.open(storeUrl, { branch: "main" });
+  const store = await openStore(storeUrl);
   const [initTimeSecs, leadTimeSecs] = await Promise.all([
     readNumericArray(store, "/init_time"),
     readNumericArray(store, "/lead_time"),

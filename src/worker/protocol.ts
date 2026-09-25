@@ -56,7 +56,15 @@ export interface SampleRequest {
   row: number;
 }
 
-export type MainToWorker = OpenRequest | LoadAllRequest | PaintRequest | SampleRequest;
+/**
+ * Re-open the map stores and report whether they now splice into a newer
+ * forecast than the one loaded. Leaves the loaded forecast alone.
+ */
+export interface CheckLatestRequest {
+  type: "checkLatest";
+}
+
+export type MainToWorker = OpenRequest | LoadAllRequest | PaintRequest | SampleRequest | CheckLatestRequest;
 
 export interface OpenedMessage {
   type: "opened";
@@ -145,6 +153,12 @@ export interface SampleFailedMessage {
   message: string;
 }
 
+/** Answer to `checkLatest`; not sent when the check itself fails. */
+export interface LatestMessage {
+  type: "latest";
+  newer: boolean;
+}
+
 export type WorkerToMain =
   | OpenedMessage
   | FrameLoadedMessage
@@ -153,4 +167,5 @@ export type WorkerToMain =
   | FrameErrorMessage
   | SampleSeriesMessage
   | SampleFailedMessage
+  | LatestMessage
   | FatalErrorMessage;

@@ -15,7 +15,7 @@ import { HRRR_GRID } from "../lib/lcc.ts";
 import { packBits, unpackBits } from "../lib/packbits.ts";
 import { buildIndexMap, paintFrame, type IndexMap } from "../lib/reproject.ts";
 import { isTransientLoadError, withRetry } from "../lib/retry.ts";
-import { spliceRuns, type FrameSource } from "../lib/splice.ts";
+import { isNewerTimeline, spliceRuns, type FrameSource, type SplicedTimeline } from "../lib/splice.ts";
 import { loadField, loadPointSeries, openHrrrDataset, openPointDataset, type HrrrDataset, type PointDataset } from "../lib/store.ts";
 import type { MainToWorker, PaintRequest, SampleRequest, WorkerToMain } from "./protocol.ts";
 import { progressiveLeadOrder } from "./schedule.ts";
@@ -71,6 +71,8 @@ let runs: HrrrDataset[] = [];
 let frameSources: FrameSource[] = [];
 /** Hour 0 of the spliced timeline, epoch ms. */
 let baseInitMs = 0;
+/** What was opened, so `checkLatest` can open it again and compare. */
+let opened: { storeUrls: string[]; specs: { name: string; scale: number }[]; timeline: SplicedTimeline } | null = null;
 let layers: LayerState[] = [];
 let indexMap: IndexMap | null = null;
 let downsample = 1;
@@ -125,16 +127,10 @@ async function handleOpen(storeUrls: string[], layerIds: string[], factor: numbe
     buildIndexMap(HRRR_GRID, canvasWidth, frameNy, frameNx),
   );
 
-  const datasets = await openMapStores(
-    storeUrls,
-    layers.map((l) => ({ name: l.config.arrayName, scale: l.config.scale })),
-  );
-  const timeline = spliceRuns(
-    datasets.map((d) => ({
-      initTimeMs: d.initTimes[d.latestInitIndex]!.getTime(),
-      leadHours: d.leadTimeHours,
-    })),
-  );
+  const specs = layers.map((l) => ({ name: l.config.arrayName, scale: l.config.scale }));
+  const datasets = await openMapStores(storeUrls, specs);
+  const timeline = spliceDatasets(datasets);
+  opened = { storeUrls, specs, timeline };
   runs = datasets;
   frameSources = timeline.sources;
   baseInitMs = timeline.initTimeMs;
@@ -151,6 +147,21 @@ async function handleOpen(storeUrls: string[], layerIds: string[], factor: numbe
     indexHeight: indexMap.height,
     corners: indexMap.corners,
   });
+}
+
+function spliceDatasets(datasets: HrrrDataset[]): SplicedTimeline {
+  return spliceRuns(
+    datasets.map((d) => ({
+      initTimeMs: d.initTimes[d.latestInitIndex]!.getTime(),
+      leadHours: d.leadTimeHours,
+    })),
+  );
+}
+
+async function handleCheckLatest(): Promise<void> {
+  if (!opened) return;
+  const fresh = spliceDatasets(await openMapStores(opened.storeUrls, opened.specs));
+  post({ type: "latest", newer: isNewerTimeline(opened.timeline, fresh) });
 }
 
 async function handleLoadAll() {
@@ -344,6 +355,9 @@ self.onmessage = (ev: MessageEvent<MainToWorker>) => {
     handleLoadAll().catch(fail);
   } else if (msg.type === "paint") {
     handlePaint(msg);
+  } else if (msg.type === "checkLatest") {
+    // A failed check just means no update offer this time.
+    handleCheckLatest().catch((e) => console.warn("update check failed:", e));
   } else if (msg.type === "sample") {
     // Sampling failures must never surface as a fatal store error; the map
     // and animation work fine without the readout.

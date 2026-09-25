@@ -123,6 +123,13 @@ export const READOUT_MAX_ATTEMPTS = 2;
 /** Wait before retrying a failed point read, so a retry isn't spent instantly. */
 export const READOUT_RETRY_DELAY_MS = 2000;
 
+/**
+ * How often an open, visible tab looks for a newer forecast run. HRRR's
+ * hourly run lands roughly every hour, so this keeps an unattended tab at
+ * most about one run behind without re-reading store metadata constantly.
+ */
+export const UPDATE_CHECK_INTERVAL_MS = 15 * 60_000;
+
 export const BASEMAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
 
 /** Progressive loading passes: hour strides, coarse first. */

@@ -57,6 +57,9 @@ export class AppUI {
   private readonly progressBar: HTMLElement;
   private readonly progressWrap: HTMLElement;
   private readonly statusEl: HTMLElement;
+  private readonly titleBox: HTMLElement;
+  private updateNotice: HTMLElement | null = null;
+  private initDate: Date | null = null;
   private readonly readout: HTMLElement;
   private readonly readoutTemp: HTMLElement;
   private readonly readoutDew: HTMLElement;
@@ -81,6 +84,7 @@ export class AppUI {
 
     const top = el("div", "top-bar", root);
     const titleBox = el("div", "title-box", top);
+    this.titleBox = titleBox;
     el("h1", "app-title", titleBox).textContent = "Smoke & Rain";
     this.initLabel = el("div", "init-label", titleBox);
     this.initLabel.textContent = "Loading forecast…";
@@ -240,6 +244,7 @@ export class AppUI {
     this.maxHours = h;
     this.slider.max = String(h);
     this.labelAxis();
+    this.updateNowTick();
   }
 
   private labelAxis(): void {
@@ -257,12 +262,38 @@ export class AppUI {
       day: "numeric",
     });
     this.initLabel.textContent = `HRRR forecast from ${fmt.format(initDate)}`;
-    // Position the "now" tick on the timeline if it falls inside the window.
-    const nowHours = (Date.now() - initDate.getTime()) / 3_600_000;
-    if (nowHours >= 0 && nowHours <= this.maxHours) {
-      this.nowTick.style.display = "block";
-      this.nowTick.style.left = `${(nowHours / this.maxHours) * 100}%`;
-    }
+    this.initDate = initDate;
+    this.updateNowTick();
+  }
+
+  /**
+   * Place the "now" tick on the timeline, or hide it once now has left the
+   * forecast window. Called again as time passes, so a long-open tab's tick
+   * keeps up with the clock.
+   */
+  updateNowTick(): void {
+    if (!this.initDate) return;
+    const nowHours = (Date.now() - this.initDate.getTime()) / 3_600_000;
+    const inside = nowHours >= 0 && nowHours <= this.maxHours;
+    this.nowTick.style.display = inside ? "block" : "none";
+    if (inside) this.nowTick.style.left = `${(nowHours / this.maxHours) * 100}%`;
+  }
+
+  /**
+   * Offer a newer forecast run, under the init label it supersedes. An offer,
+   * not an automatic switch: loading one is tens of megabytes, and the user
+   * may be mid-scrub.
+   */
+  showUpdateAvailable(onUpdate: () => void): void {
+    if (this.updateNotice) return;
+    const notice = el("div", "update-notice", this.titleBox);
+    notice.setAttribute("role", "status");
+    el("span", "update-text", notice).textContent = "Newer forecast available";
+    const btn = el("button", "update-btn", notice);
+    btn.type = "button";
+    btn.textContent = "Update";
+    btn.addEventListener("click", onUpdate);
+    this.updateNotice = notice;
   }
 
   setTime(validDate: Date, t: number, playing: boolean): void {
