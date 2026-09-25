@@ -38,11 +38,14 @@ centered on your location. All data is read directly in the browser from
    init (1-byte manifest probes), and streams frames progressively (every 6 h
    first — playable after ~5 MB — then 3 h, then hourly; ~35 MB total).
    Fields are quantized to log-scale bytes (block-max downsampled 2× on
-   phones).
+   phones) and kept PackBits-compressed, a few percent of their raw 1.9 MB.
+   Reads time out and retry, and an open tab re-checks the stores every
+   15 minutes to offer a newer run.
 5. Frames render on the **GPU** via a MapLibre custom layer: a fragment
    shader inverts each screen pixel through the Lambert conformal projection,
-   crossfades two quantized frame textures, and applies the palette LUT — so
-   animation costs the CPU almost nothing. Where the shader won't
+   maps two frame textures through the palette LUT, and crossfades the
+   colours (not the bytes, where 0 means "nothing") — so animation costs the
+   CPU almost nothing. Where the shader won't
    initialize, a fallback renderer paints frames in the worker through a
    precomputed **Lambert-conformal → web-mercator index map** and blits them
    into MapLibre canvas sources (`?gpu=0`/`?gpu=1` force a renderer).
