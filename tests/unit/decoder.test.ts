@@ -104,4 +104,23 @@ describe("decodeGrib2Message vs gribberish oracle", () => {
     }
     expect(() => decodeGrib2Message(copy)).toThrow(/5\.40/);
   });
+
+  it("rejects packed data shorter than its section 5 parameters imply", () => {
+    // Rebuild the message with the tail of section 7 cut off but every length
+    // field consistent. Only the last values are lost, so the group headers
+    // still add up and nothing but a bounds check notices.
+    const bytes = loadFixture("prate_f06.grib2");
+    const u32at = (b: Uint8Array, o: number) =>
+      ((b[o]! << 24) | (b[o + 1]! << 16) | (b[o + 2]! << 8) | b[o + 3]!) >>> 0;
+    let pos = 16;
+    while (bytes[pos + 4] !== 7) pos += u32at(bytes, pos);
+    const s7Len = u32at(bytes, pos);
+    const cut = 64;
+    const out = new Uint8Array(bytes.length - cut);
+    out.set(bytes.subarray(0, pos + s7Len - cut));
+    out.set(bytes.subarray(pos + s7Len), pos + s7Len - cut);
+    new DataView(out.buffer).setUint32(pos, s7Len - cut);
+    new DataView(out.buffer).setUint32(12, out.length);
+    expect(() => decodeGrib2Message(out)).toThrow(/ends before all values/);
+  });
 });
