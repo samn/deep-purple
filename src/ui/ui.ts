@@ -66,6 +66,8 @@ export class AppUI {
   private readonly layers: { config: LayerConfig; colormap: Colormap }[];
   private readonly axisTicks: HTMLElement[] = [];
   private maxHours = 48;
+  /** Play state the button currently shows. */
+  private shownPlaying = false;
   private units: UnitSystem = loadUnitSystem();
   /** Last state, kept so a unit switch can re-render without new data. */
   private readoutState: ReadoutState = { kind: "hidden" };
@@ -270,8 +272,14 @@ export class AppUI {
     if (document.activeElement !== this.slider || playing) {
       this.slider.value = String(t);
     }
-    this.playBtn.innerHTML = playing ? PAUSE_ICON : PLAY_ICON;
-    this.playBtn.setAttribute("aria-label", playing ? "Pause animation" : "Play animation");
+    // Only on a change: this runs every animation frame, and replacing the
+    // button's contents between press and release swallows the click (WebKit
+    // drops it when the pressed text node is gone), so pause could miss.
+    if (playing !== this.shownPlaying) {
+      this.shownPlaying = playing;
+      this.playBtn.innerHTML = playing ? PAUSE_ICON : PLAY_ICON;
+      this.playBtn.setAttribute("aria-label", playing ? "Pause animation" : "Play animation");
+    }
   }
 
   /** Show, hide, or show a loading placeholder for the located-point readout. */
