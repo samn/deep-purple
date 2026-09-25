@@ -83,9 +83,19 @@ describe("paintFrame", () => {
     expect(pixels[7]).toBe(0); // alpha cleared outside grid
   });
 
-  it("crossfades between two frames in byte space", () => {
+  it("crossfades colours, weighting each by its opacity", () => {
     const pixels = new Uint8ClampedArray(2 * 4);
     paintFrame(map, lut, pixels, new Uint8Array([100]), new Uint8Array([200]), 0.5);
-    expect(Array.from(pixels.slice(0, 4))).toEqual([30, 40, 50, 60]);
+    // Not byte 150's colour: alpha 40 and 80 average to 60, and the more
+    // opaque frame pulls the colour its way.
+    expect(Array.from(pixels.slice(0, 4))).toEqual([37, 47, 57, 60]);
+  });
+
+  it("fades a value in from nothing by opacity alone", () => {
+    const pixels = new Uint8ClampedArray(2 * 4);
+    paintFrame(map, lut, pixels, new Uint8Array([0]), new Uint8Array([200]), 0.25);
+    expect(Array.from(pixels.slice(0, 4))).toEqual([50, 60, 70, 20]);
+    paintFrame(map, lut, pixels, new Uint8Array([0]), new Uint8Array([0]), 0.5);
+    expect(pixels[3]).toBe(0);
   });
 });

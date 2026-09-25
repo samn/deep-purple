@@ -129,6 +129,11 @@ export function buildIndexMap(
 /**
  * Paint a frame (or a crossfade of two frames) into an RGBA pixel buffer
  * using the index map and a 256-entry RGBA LUT. `t` blends frameA→frameB.
+ *
+ * The crossfade mixes colours, not bytes. Bytes are log-scale intensities
+ * with 0 meaning "nothing", so mixing them would draw rain fading in as a
+ * band of moderate rain; mixing premultiplied colours fades its opacity
+ * instead.
  */
 export function paintFrame(
   map: IndexMap,
@@ -147,14 +152,26 @@ export function paintFrame(
       pixels[o + 3] = 0;
       continue;
     }
-    let b = frameA[idx]!;
-    if (blend) {
-      b = Math.round(b * (1 - t) + frameB[idx]! * t);
+    const la = frameA[idx]! * 4;
+    if (!blend) {
+      pixels[o] = lut[la]!;
+      pixels[o + 1] = lut[la + 1]!;
+      pixels[o + 2] = lut[la + 2]!;
+      pixels[o + 3] = lut[la + 3]!;
+      continue;
     }
-    const l = b * 4;
-    pixels[o] = lut[l]!;
-    pixels[o + 1] = lut[l + 1]!;
-    pixels[o + 2] = lut[l + 2]!;
-    pixels[o + 3] = lut[l + 3]!;
+    const lb = frameB[idx]! * 4;
+    const wa = lut[la + 3]! * (1 - t);
+    const wb = lut[lb + 3]! * t;
+    const alpha = wa + wb;
+    if (alpha === 0) {
+      pixels[o + 3] = 0;
+      continue;
+    }
+    // Canvas pixels are straight alpha: blend premultiplied, then divide.
+    pixels[o] = (lut[la]! * wa + lut[lb]! * wb) / alpha;
+    pixels[o + 1] = (lut[la + 1]! * wa + lut[lb + 1]! * wb) / alpha;
+    pixels[o + 2] = (lut[la + 2]! * wa + lut[lb + 2]! * wb) / alpha;
+    pixels[o + 3] = alpha;
   }
 }
