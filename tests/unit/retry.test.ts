@@ -76,5 +76,6 @@ describe("isTransientLoadError", () => {
     expect(isTransientLoadError(err("Failed to fetch virtual chunk from https://x/y.grib2: 404 Not Found"))).toBe(false);
     expect(isTransientLoadError(err("HTTP 403 Forbidden for https://x/y"))).toBe(false);
     expect(isTransientLoadError(err("Packed data ends early", "GribDecodeError"))).toBe(false);
+    expect(isTransientLoadError(err("Object not found: manifests/ABC", "NotFoundError"))).toBe(false);
   });
 });

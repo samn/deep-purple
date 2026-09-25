@@ -25,7 +25,8 @@ import { progressiveLeadOrder } from "./schedule.ts";
 // and zarrita only imports its ~600 kB blosc codec when it first meets one:
 // after the repo, snapshot and array metadata round trips. Start that import
 // now so the download overlaps them instead of following them.
-void zarr.registry.get("blosc")?.();
+// A failed prefetch is harmless: the real read imports it again and reports.
+void Promise.resolve(zarr.registry.get("blosc")?.()).catch(() => {});
 
 const COLORMAPS = { precip: PRECIP_COLORMAP, smoke: SMOKE_COLORMAP } as const;
 

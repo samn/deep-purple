@@ -128,18 +128,4 @@ describe("ReadoutSampler", () => {
     expect(sampler.readoutAt(0)).toEqual({ kind: "hidden" });
     expect(requests).toHaveLength(1);
   });
-
-  it("re-reads the same cell on reload and ignores the old reply", () => {
-    const { sampler, requests } = setup();
-    sampler.setReady();
-    sampler.setCell(CELL);
-    sampler.onSeries(1, HOURS, series(), series());
-    sampler.reload();
-    expect(requests.map((r) => r.requestId)).toEqual([1, 2]);
-    expect(sampler.readoutAt(0)).toEqual({ kind: "loading" });
-    sampler.onSeries(1, HOURS, series(), series());
-    expect(sampler.readoutAt(0)).toEqual({ kind: "loading" });
-    sampler.onSeries(2, HOURS, series(), series());
-    expect(sampler.readoutAt(0).kind).toBe("value");
-  });
 });

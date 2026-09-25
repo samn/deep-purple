@@ -12,11 +12,19 @@
 const MAX_LITERAL = 128;
 const MAX_RUN = 129;
 
+/**
+ * Worst-case output buffer, kept between calls: frames are all the same size,
+ * and only the exact-length copy returned needs a fresh allocation.
+ */
+let scratch = new Uint8Array(0);
+
 export function packBits(src: Uint8Array): Uint8Array<ArrayBuffer> {
   // Every literal but the first either hits the length cap or follows a run
   // of 3+ (which saved at least a byte), so the worst case adds one control
   // byte per 128, plus one.
-  const out = new Uint8Array(src.length + Math.ceil(src.length / MAX_LITERAL) + 1);
+  const bound = src.length + Math.ceil(src.length / MAX_LITERAL) + 1;
+  if (scratch.length < bound) scratch = new Uint8Array(bound);
+  const out = scratch;
   const n = src.length;
   let o = 0;
   let i = 0;

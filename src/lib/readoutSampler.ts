@@ -102,17 +102,6 @@ export class ReadoutSampler {
     this.maybeRequest();
   }
 
-  /**
-   * Forget the loaded series and read the current cell again, e.g. once the
-   * map has moved to a newer forecast run.
-   */
-  reload(): void {
-    this.requestId++;
-    this.series.clear();
-    this.reset();
-    this.maybeRequest();
-  }
-
   onSeries(requestId: number, leadHours: number[], temperatureC: Float32Array, dewpointC: Float32Array): void {
     if (requestId !== this.requestId) return;
     this.state = "loaded";

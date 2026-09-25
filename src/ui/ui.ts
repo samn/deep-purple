@@ -366,6 +366,11 @@ export class AppUI {
 
   setStatus(message: string | null, isError: boolean): void {
     this.status = message === null ? null : { message, isError };
+    // An error outranks a passing message: cut the flash short for it.
+    if (isError && this.flashTimer !== null) {
+      clearTimeout(this.flashTimer);
+      this.flashTimer = null;
+    }
     if (this.flashTimer === null) this.renderStatus(this.status);
   }
 

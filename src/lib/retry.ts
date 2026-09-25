@@ -28,7 +28,9 @@ export class TimeoutError extends Error {
  */
 export function isTransientLoadError(e: unknown): boolean {
   if (!(e instanceof Error)) return true;
-  if (e.name === "GribDecodeError") return false;
+  // icechunk-js reports a 404 from its own storage as a NotFoundError whose
+  // message carries no status code.
+  if (e.name === "GribDecodeError" || e.name === "NotFoundError") return false;
   const status = /(?:HTTP |: )([1-5]\d\d)\b/.exec(e.message)?.[1];
   if (!status) return true;
   const code = Number(status);
