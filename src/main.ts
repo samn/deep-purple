@@ -310,7 +310,7 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
       break;
     }
     case "frameLoaded": {
-      if (msg.data) gpuLayers.get(msg.layerId)?.setFrame(msg.leadIndex, msg.data);
+      if (msg.packed) gpuLayers.get(msg.layerId)?.setFrame(msg.leadIndex, msg.packed);
       frameStore?.markLoaded(msg.layerId, msg.leadIndex);
       break;
     }

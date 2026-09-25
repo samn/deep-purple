@@ -15,6 +15,7 @@ import type {
   Map as MapLibreMap,
 } from "maplibre-gl";
 import { makeLccConstants, makeLccProjection, type LccGrid } from "../lib/lcc.ts";
+import { unpackBits } from "../lib/packbits.ts";
 import { gridMercatorBounds } from "../lib/reproject.ts";
 
 /** Matches the canvas renderer's raster-opacity. */
@@ -147,8 +148,11 @@ export class GpuForecastLayer implements CustomLayerInterface {
   private b = -1;
   private blend = 0;
 
+  /** PackBits-compressed frames; decoded only to upload a texture. */
   private readonly frames = new Map<number, Uint8Array>();
   private readonly textures = new Map<number, CachedTexture>();
+  /** Decode target for texture uploads, allocated on first use. */
+  private scratch: Uint8Array | null = null;
   private tick = 0;
 
   private gl: WebGL2RenderingContext | null = null;
@@ -169,9 +173,9 @@ export class GpuForecastLayer implements CustomLayerInterface {
     this.lut = lut;
   }
 
-  /** Store a loaded frame's quantized bytes; textures upload on demand. */
-  setFrame(leadIndex: number, data: Uint8Array): void {
-    this.frames.set(leadIndex, data);
+  /** Store a loaded frame's compressed bytes; textures upload on demand. */
+  setFrame(leadIndex: number, packed: Uint8Array): void {
+    this.frames.set(leadIndex, packed);
     const cached = this.textures.get(leadIndex);
     if (cached) {
       this.gl?.deleteTexture(cached.texture);
@@ -419,8 +423,10 @@ void main() {
       cached.lastUse = this.tick;
       return cached.texture;
     }
-    const data = this.frames.get(leadIndex);
-    if (!data) return null;
+    const packed = this.frames.get(leadIndex);
+    if (!packed) return null;
+    const data = (this.scratch ??= new Uint8Array(this.frameNx * this.frameNy));
+    unpackBits(packed, data);
 
     const texture = gl.createTexture();
     if (!texture) return null;

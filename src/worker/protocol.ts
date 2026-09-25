@@ -78,13 +78,14 @@ export interface OpenedMessage {
 /**
  * A frame arrived and is paintable. The bytes stay in the worker unless the
  * open request set `sendFrameBytes`, in which case they are transferred here
- * (quantized values, frame ny x nx) and the worker keeps nothing.
+ * and the worker keeps nothing: quantized values, frame ny x nx, compressed
+ * with `lib/packbits.ts`.
  */
 export interface FrameLoadedMessage {
   type: "frameLoaded";
   layerId: string;
   leadIndex: number;
-  data?: Uint8Array;
+  packed?: Uint8Array;
 }
 
 export interface PaintedMessage {
