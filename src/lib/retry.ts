@@ -19,6 +19,22 @@ export class TimeoutError extends Error {
   override name = "TimeoutError";
 }
 
+/**
+ * Whether a failed store read is worth trying again. Corrupt data and 4xx
+ * responses come back the same every time (a missing object stays missing);
+ * timeouts, network drops, throttling and 5xx usually don't. Status codes only
+ * reach us inside icechunk-js's error messages ("…: 404 Not Found", "HTTP 503
+ * …"), so they are read from there.
+ */
+export function isTransientLoadError(e: unknown): boolean {
+  if (!(e instanceof Error)) return true;
+  if (e.name === "GribDecodeError") return false;
+  const status = /(?:HTTP |: )([1-5]\d\d)\b/.exec(e.message)?.[1];
+  if (!status) return true;
+  const code = Number(status);
+  return code >= 500 || code === 408 || code === 429;
+}
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**

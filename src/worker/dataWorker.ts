@@ -13,7 +13,7 @@ import { FRAME_LOAD_RETRY, LAYERS, LOAD_PASSES, POINT_STORE_URL, POINT_VARIABLES
 import { makeLut, makeQuantizer, quantizeField, PRECIP_COLORMAP, SMOKE_COLORMAP, type Quantizer } from "../lib/colormap.ts";
 import { HRRR_GRID } from "../lib/lcc.ts";
 import { buildIndexMap, paintFrame, type IndexMap } from "../lib/reproject.ts";
-import { withRetry } from "../lib/retry.ts";
+import { isTransientLoadError, withRetry } from "../lib/retry.ts";
 import { spliceRuns, type FrameSource } from "../lib/splice.ts";
 import { loadField, loadPointSeries, openHrrrDataset, openPointDataset, type HrrrDataset, type PointDataset } from "../lib/store.ts";
 import type { MainToWorker, PaintRequest, SampleRequest, WorkerToMain } from "./protocol.ts";
@@ -150,8 +150,7 @@ async function handleLoadAll() {
               source.leadIndex,
               signal,
             ),
-          // Bad GRIB bytes decode the same way every time.
-          { ...FRAME_LOAD_RETRY, retryable: (e) => !(e instanceof Error && e.name === "GribDecodeError") },
+          { ...FRAME_LOAD_RETRY, retryable: isTransientLoadError },
         );
         const q = quantizeField(job.layer.quantizer, values, ny, nx, downsample);
         if (sendFrameBytes) {

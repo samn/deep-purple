@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TimeoutError, withRetry } from "../../src/lib/retry.ts";
+import { isTransientLoadError, TimeoutError, withRetry } from "../../src/lib/retry.ts";
 
 const OPTS = { attempts: 3, timeoutMs: 1000, backoffMs: 100 };
 
@@ -58,5 +58,23 @@ describe("withRetry", () => {
     });
     await expect(withRetry(fn, { ...OPTS, retryable: (e) => !(e instanceof RangeError) })).rejects.toThrow("corrupt");
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("isTransientLoadError", () => {
+  const err = (message: string, name = "Error") => Object.assign(new Error(message), { name });
+
+  it("retries timeouts, network drops, throttling and server errors", () => {
+    expect(isTransientLoadError(new TimeoutError("timed out"))).toBe(true);
+    expect(isTransientLoadError(new TypeError("Failed to fetch"))).toBe(true);
+    expect(isTransientLoadError(err("Failed to fetch virtual chunk from https://x/y.grib2: 503 Service Unavailable"))).toBe(true);
+    expect(isTransientLoadError(err("HTTP 500 Internal Server Error for https://x/y"))).toBe(true);
+    expect(isTransientLoadError(err("Failed to fetch virtual chunk from https://x: 429 Too Many Requests"))).toBe(true);
+  });
+
+  it("gives up on missing objects, refusals and corrupt data", () => {
+    expect(isTransientLoadError(err("Failed to fetch virtual chunk from https://x/y.grib2: 404 Not Found"))).toBe(false);
+    expect(isTransientLoadError(err("HTTP 403 Forbidden for https://x/y"))).toBe(false);
+    expect(isTransientLoadError(err("Packed data ends early", "GribDecodeError"))).toBe(false);
   });
 });
