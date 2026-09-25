@@ -42,7 +42,7 @@ centered on your location. All data is read directly in the browser from
 5. Frames render on the **GPU** via a MapLibre custom layer: a fragment
    shader inverts each screen pixel through the Lambert conformal projection,
    crossfades two quantized frame textures, and applies the palette LUT — so
-   animation costs the CPU almost nothing. Where WebGL2 (or the shader) won't
+   animation costs the CPU almost nothing. Where the shader won't
    initialize, a fallback renderer paints frames in the worker through a
    precomputed **Lambert-conformal → web-mercator index map** and blits them
    into MapLibre canvas sources (`?gpu=0`/`?gpu=1` force a renderer).

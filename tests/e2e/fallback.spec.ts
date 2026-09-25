@@ -19,8 +19,7 @@ test("defaults to the gpu renderer when webgl2 is available", async ({ context, 
 test("selects the canvas renderer when webgl2 is unavailable", async ({ context, page }) => {
   await routeFixtures(context);
   // Kill WebGL2 before the app boots. MapLibre itself can't start either, so
-  // only the selection logic is assertable here — but that logic is exactly
-  // what must not regress for weak devices.
+  // only the selection logic and the error message are assertable here.
   await page.addInitScript(() => {
     const original = HTMLCanvasElement.prototype.getContext;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -36,6 +35,7 @@ test("selects the canvas renderer when webgl2 is unavailable", async ({ context,
   expect(await page.evaluate(() => (window as unknown as { __renderer: string }).__renderer)).toBe(
     "canvas",
   );
+  await expect(page.locator(".status-error")).toContainText("WebGL2 is unavailable");
 });
 
 test.describe("canvas renderer (?gpu=0)", () => {
