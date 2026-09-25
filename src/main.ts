@@ -1,5 +1,8 @@
-import maplibregl from "maplibre-gl";
+import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+// MapLibre v6 can't locate its worker from inside a bundle; hand it Vite's
+// self-contained worker chunk.
+import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import "./style.css";
 import {
   BASEMAP_STYLE_URL,
@@ -20,14 +23,16 @@ import { ForecastLayer, type OverlayPlacement } from "./render/layer.ts";
 import { AppUI } from "./ui/ui.ts";
 import type { MainToWorker, PaintJob, WorkerToMain } from "./worker/protocol.ts";
 
+maplibregl.setWorkerUrl(maplibreWorkerUrl);
+
 const COLORMAPS = { smoke: SMOKE_COLORMAP, precip: PRECIP_COLORMAP } as const;
 
 const params = new URLSearchParams(location.search);
 const autoplay = params.get("autoplay") !== "0";
 /**
  * GPU renderer (reprojection + crossfade + palette in a custom-layer shader)
- * by default; the worker-painted canvas renderer is the fallback when WebGL2
- * or the shader won't initialize. `?gpu=1`/`?gpu=0` force a renderer.
+ * by default; the worker-painted canvas renderer is the fallback when the
+ * shader won't initialize. `?gpu=1`/`?gpu=0` force a renderer.
  */
 const gpuParam = params.get("gpu");
 const useGpu = gpuParam === "0" ? false : gpuParam === "1" ? true : gpuRendererSupported();
@@ -70,15 +75,29 @@ const ui = new AppUI(
   },
 );
 
-const map = new maplibregl.Map({
-  container: "map",
-  style: BASEMAP_STYLE_URL,
-  center: CONUS_CENTER,
-  zoom: CONUS_ZOOM,
-  minZoom: 2.5,
-  maxZoom: 11,
-  attributionControl: { compact: true, customAttribution: "Forecast: NOAA HRRR via dynamical.org (CC BY 4.0)" },
-});
+/**
+ * MapLibre v6 requires WebGL2 and throws from the constructor without it. Say
+ * so instead of leaving a blank page; nothing below can run without a map.
+ */
+function createMap(): maplibregl.Map {
+  try {
+    return new maplibregl.Map({
+      container: "map",
+      style: BASEMAP_STYLE_URL,
+      center: CONUS_CENTER,
+      zoom: CONUS_ZOOM,
+      minZoom: 2.5,
+      maxZoom: 11,
+      attributionControl: { compact: true, customAttribution: "Forecast: NOAA HRRR via dynamical.org (CC BY 4.0)" },
+    });
+  } catch (e) {
+    if (e instanceof maplibregl.GPUInitializationError) {
+      ui.setStatus("This browser can't draw the map: WebGL2 is unavailable.", true);
+    }
+    throw e;
+  }
+}
+const map = createMap();
 map.touchPitch.disable();
 map.keyboard.enable();
 // Test hook: lets e2e specs assert on map state (center, layers).

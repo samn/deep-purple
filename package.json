@@ -21,21 +21,21 @@
   },
   "dependencies": {
     "icechunk-js": "0.6.0",
-    "maplibre-gl": "5.24.0",
-    "zarrita": "0.7.3"
+    "maplibre-gl": "6.11.2",
+    "zarrita": "0.7.5"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@mattnucc/gribberish": "1.5.0",
-    "@playwright/test": "1.56.0",
-    "@types/node": "26.1.1",
-    "eslint": "10.7.0",
-    "globals": "17.7.0",
+    "@mattnucc/gribberish": "1.7.0",
+    "@playwright/test": "1.63.0",
+    "@types/node": "26.6.2",
+    "eslint": "10.11.0",
+    "globals": "17.12.0",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.64.0",
-    "vite": "8.1.5",
-    "vitest": "4.1.10",
-    "wrangler": "4.118.0"
+    "typescript-eslint": "8.70.1",
+    "vite": "8.3.1",
+    "vitest": "5.0.2",
+    "wrangler": "4.140.0"
   },
   "private": true,
   "type": "module"
