@@ -17,8 +17,15 @@ import { buildIndexMap, paintFrame, type IndexMap } from "../lib/reproject.ts";
 import { isTransientLoadError, withRetry } from "../lib/retry.ts";
 import { isNewerTimeline, spliceRuns, type FrameSource, type SplicedTimeline } from "../lib/splice.ts";
 import { loadField, loadPointSeries, openHrrrDataset, openPointDataset, type HrrrDataset, type PointDataset } from "../lib/store.ts";
+import * as zarr from "zarrita";
 import type { MainToWorker, PaintRequest, SampleRequest, WorkerToMain } from "./protocol.ts";
 import { progressiveLeadOrder } from "./schedule.ts";
+
+// The stores' coordinate arrays (init_time, lead_time) are blosc-compressed,
+// and zarrita only imports its ~600 kB blosc codec when it first meets one:
+// after the repo, snapshot and array metadata round trips. Start that import
+// now so the download overlaps them instead of following them.
+void zarr.registry.get("blosc")?.();
 
 const COLORMAPS = { precip: PRECIP_COLORMAP, smoke: SMOKE_COLORMAP } as const;
 
