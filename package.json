@@ -20,22 +20,22 @@
     "url": "http://local_proxy@127.0.0.1:41729/git/samn/hrrrr-map"
   },
   "dependencies": {
-    "icechunk-js": "0.6.0",
-    "maplibre-gl": "6.11.2",
+    "icechunk-js": "0.6.1",
+    "maplibre-gl": "6.16.0",
     "zarrita": "0.7.5"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@mattnucc/gribberish": "1.7.0",
-    "@playwright/test": "1.63.0",
-    "@types/node": "26.6.2",
-    "eslint": "10.11.0",
-    "globals": "17.12.0",
+    "@playwright/test": "1.64.1",
+    "@types/node": "26.6.6",
+    "eslint": "10.14.0",
+    "globals": "17.14.0",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.70.1",
-    "vite": "8.3.1",
-    "vitest": "5.0.2",
-    "wrangler": "4.140.0"
+    "typescript-eslint": "8.72.1",
+    "vite": "8.3.5",
+    "vitest": "5.1.0",
+    "wrangler": "4.157.0"
   },
   "private": true,
   "type": "module"

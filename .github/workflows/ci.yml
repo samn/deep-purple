@@ -23,8 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     container:
       # Pin the Playwright image to the @playwright/test version (chromium build
-      # 1243) so visual snapshots render identically everywhere.
-      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      # 1248) so visual snapshots render identically everywhere.
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
