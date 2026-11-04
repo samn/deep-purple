@@ -202,8 +202,12 @@ export class AppUI {
       const h = Math.round(bar.getBoundingClientRect().height);
       if (h > 0) document.documentElement.style.setProperty("--bar-h", `${h}px`);
     };
-    if (typeof ResizeObserver === "function") new ResizeObserver(apply).observe(bar);
-    else window.addEventListener("resize", apply);
+    // border-box: the safe-area inset is in the bar's padding, and an iOS
+    // home-screen app can resolve it after first measure without changing the
+    // content box, which a default (content-box) observer would miss.
+    if (typeof ResizeObserver === "function") {
+      new ResizeObserver(apply).observe(bar, { box: "border-box" });
+    } else window.addEventListener("resize", apply);
     apply();
   }
 
