@@ -14,7 +14,8 @@ const DENVER = {
   longitude: fixtureManifest.point.lon,
   latitude: fixtureManifest.point.lat,
 };
-const AT_0H = { temp: "31°C", dew: "0°C" };
+// The app opens on "now", which the pinned clock puts at +2h.
+const AT_OPEN = { temp: "35°C", dew: "-6°C", tempF: "94°F", dewF: "20°F" };
 const AT_12H = { temp: "23°C", dew: "-11°C" };
 const AT_30H = { temp: "37°C", dew: "-11°C" };
 
@@ -34,8 +35,8 @@ test.describe("forecast readout with a location", () => {
 
   test("shows temperature and dew point for the located point", async ({ page }) => {
     await expect(page.locator(readout)).toBeVisible();
-    await expect(page.locator(tempValue)).toHaveText(AT_0H.temp);
-    await expect(page.locator(dewValue)).toHaveText(AT_0H.dew);
+    await expect(page.locator(tempValue)).toHaveText(AT_OPEN.temp);
+    await expect(page.locator(dewValue)).toHaveText(AT_OPEN.dew);
     // Named for assistive tech. role=group is required for the name to stick:
     // ARIA forbids naming a plain div (implicit role `generic`).
     await expect(page.locator(readout)).toHaveAttribute("role", "group");
@@ -123,7 +124,7 @@ test.describe("forecast readout with a location", () => {
   });
 
   test("updates when the timeline is scrubbed", async ({ page }) => {
-    await expect(page.locator(tempValue)).toHaveText(AT_0H.temp);
+    await expect(page.locator(tempValue)).toHaveText(AT_OPEN.temp);
 
     await page.locator(".scrubber").fill("30");
     await expect(page.locator(".rel-label")).toHaveText("+30h");
@@ -214,7 +215,7 @@ test.describe("loading placeholder", () => {
 
     release();
 
-    await expect(page.locator(tempValue)).toHaveText(AT_0H.temp);
+    await expect(page.locator(tempValue)).toHaveText(AT_OPEN.temp);
     await expect(page.locator(readout)).not.toHaveAttribute("aria-busy", /.*/);
     const loadedBox = (await page.locator(readout).boundingBox())!;
     // Same footprint before and after, so nothing jumps as data lands.
@@ -263,17 +264,16 @@ test.describe("unit toggle", () => {
   });
 
   test("switches the readout between Celsius and Fahrenheit", async ({ page }) => {
-    await expect(page.locator(tempValue)).toHaveText("31°C");
-    await expect(page.locator(dewValue)).toHaveText("0°C");
+    await expect(page.locator(tempValue)).toHaveText(AT_OPEN.temp);
+    await expect(page.locator(dewValue)).toHaveText(AT_OPEN.dew);
 
     await page.locator(unitBtn).click();
 
-    // 30.75°C -> 87°F, -0.33°C -> 31°F.
-    await expect(page.locator(tempValue)).toHaveText("87°F");
-    await expect(page.locator(dewValue)).toHaveText("31°F");
+    await expect(page.locator(tempValue)).toHaveText(AT_OPEN.tempF);
+    await expect(page.locator(dewValue)).toHaveText(AT_OPEN.dewF);
 
     await page.locator(unitBtn).click();
-    await expect(page.locator(tempValue)).toHaveText("31°C");
+    await expect(page.locator(tempValue)).toHaveText(AT_OPEN.temp);
   });
 
   test("relabels the legend ranges too, and leaves µg/m³ alone", async ({ page }) => {
@@ -308,12 +308,12 @@ test.describe("unit toggle", () => {
 
   test("remembers the choice across a reload", async ({ page }) => {
     await page.locator(unitBtn).click();
-    await expect(page.locator(tempValue)).toHaveText("87°F");
+    await expect(page.locator(tempValue)).toHaveText(AT_OPEN.tempF);
 
     await gotoApp(page);
     await waitForLoaded(page);
     await expect(page.locator(unitBtn)).toHaveText("°F");
-    await expect(page.locator(tempValue)).toHaveText("87°F");
+    await expect(page.locator(tempValue)).toHaveText(AT_OPEN.tempF);
   });
 });
 

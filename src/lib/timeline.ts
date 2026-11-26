@@ -15,6 +15,8 @@ export interface TimelineOptions {
 
 export class Timeline {
   t = 0;
+  /** Where playback wraps to after the end: "now", so the loop only replays the future. */
+  start = 0;
   playing = false;
   maxHours: number;
   speed: number;
@@ -90,7 +92,7 @@ export class Timeline {
       if (this.lastTs !== null) {
         const dt = Math.min(0.25, (ts - this.lastTs) / 1000);
         this.t += dt * this.speed;
-        if (this.t > this.maxHours) this.t = 0; // loop
+        if (this.t > this.maxHours) this.t = this.start; // loop
         this.emit();
       }
       this.lastTs = ts;

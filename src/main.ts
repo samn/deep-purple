@@ -303,6 +303,10 @@ worker.onmessage = (ev: MessageEvent<WorkerToMain>) => {
       };
       const maxHours = msg.leadHours[msg.leadHours.length - 1] ?? 48;
       timeline.setMaxHours(maxHours);
+      // Open on "now" (the run's start is already an hour or two old); 0 if now is outside the forecast.
+      const nowHours = (Date.now() - msg.initTimeMs) / 3_600_000;
+      timeline.start = nowHours >= 0 && nowHours < maxHours ? nowHours : 0;
+      timeline.t = timeline.start;
       ui.setMaxHours(maxHours);
       ui.setInit(initTime);
       ui.setStatus("Loading frames…", false);
