@@ -206,6 +206,10 @@ async function handleLoadAll() {
             ),
           { ...FRAME_LOAD_RETRY, retryable: isTransientLoadError },
         );
+        // Fields averaged over the preceding hour (precip rate) are all-missing
+        // at a run's lead 0. Fail the frame so the map shows the nearest real
+        // one at that hour instead of drawing nothing.
+        if (!values.some((v) => !Number.isNaN(v))) throw new Error("no data at this lead time");
         const q = quantizeField(job.layer.quantizer, values, ny, nx, downsample);
         // Held compressed on either side: raw, 44 hours x 2 layers of 1.9 MB
         // frames would be ~170 MB of tab memory.

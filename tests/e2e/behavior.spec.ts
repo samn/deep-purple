@@ -11,11 +11,12 @@ test.describe("playback", () => {
   test("play advances the clock; pause stops it; scrubbing pauses", async ({ page }) => {
     const rel = page.locator(".rel-label");
     const playBtn = page.locator(".play-btn");
-    await expect(rel).toHaveText("+0h");
+    // Opens on "now": the pinned clock is 2h after the init.
+    await expect(rel).toHaveText("+2h");
 
     await playBtn.click();
     await expect(playBtn).toHaveAttribute("aria-label", "Pause animation");
-    await expect(rel).not.toHaveText("+0h", { timeout: 5000 });
+    await expect(rel).not.toHaveText("+2h", { timeout: 5000 });
 
     await playBtn.click();
     await expect(playBtn).toHaveAttribute("aria-label", "Play animation");
@@ -79,7 +80,8 @@ test.describe("playback", () => {
   });
 
   test("valid-time label reflects the forecast init time", async ({ page }) => {
-    const init = new Date(fixtureManifest.initTimeMs);
+    // Opens on "now", 2h after the init under the pinned clock.
+    const init = new Date(fixtureManifest.initTimeMs + 2 * 3_600_000);
     const expected = new Intl.DateTimeFormat("en-US", {
       weekday: "short",
       hour: "numeric",

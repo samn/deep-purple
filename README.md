@@ -28,7 +28,9 @@ centered on your location. All data is read directly in the browser from
    newest init in play. One consequence is that the timeline is not always 48
    hours long: with the six-hourly run five hours behind, +48 h of *that* run is
    +43 h of the timeline, and that is where the scrubber ends. Losing a store
-   is survivable — the map falls back to whatever the other one covers.
+   is survivable — the map falls back to whatever the other one covers. The
+   map opens (and playback loops back) to *now* on that timeline, not hour 0:
+   a run is an hour or two old by the time it is published.
 3. A **pure-TypeScript GRIB2 decoder** (`src/lib/grib/decoder.ts`, registered
    as the store's `gribberish` zarr codec) decodes complex-packed messages
    (DRS templates 5.0/5.2/5.3) — no WASM, no COOP/COEP headers needed. Unit

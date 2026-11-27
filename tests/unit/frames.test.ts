@@ -104,6 +104,17 @@ describe("Timeline", () => {
     expect(tl.t).toBe(0); // past maxHours: loops back to the start
   });
 
+  it("loops back to the start point, not hour 0", () => {
+    const driver = manualRaf();
+    const tl = new Timeline({ maxHours: 48, speed: 6, raf: driver.raf, caf: driver.caf });
+    tl.start = 2.5;
+    tl.t = 47.9;
+    tl.play();
+    driver.fire(0);
+    driver.fire(100);
+    expect(tl.t).toBe(2.5);
+  });
+
   it("scrubbing pauses playback and clamps", () => {
     const driver = manualRaf();
     const tl = new Timeline({ maxHours: 48, raf: driver.raf, caf: driver.caf });
